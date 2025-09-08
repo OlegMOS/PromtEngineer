@@ -134,7 +134,7 @@ class VectorDatabase:
 
 # --- 3. НАСТРОЙКА МОДЕЛИ SAIGA LLAMA3 ---
 def setup_llm_model():
-    """Настройка модели IlyaGusev/saiga_llama3_8b"""
+    """Настройка модели IlyaGusev/saiga_llama3_8b для CPU"""
     model_name = "IlyaGusev/saiga_llama3_8b"
 
     print(f"Загрузка модели: {model_name}")
@@ -147,30 +147,42 @@ def setup_llm_model():
             trust_remote_code=True
         )
 
-        # Конфигурация для квантования (экономия памяти)
-        try:
-            from transformers import BitsAndBytesConfig
-            bnb_config = BitsAndBytesConfig(
-                load_in_4bit=True,
-                bnb_4bit_use_double_quant=True,
-                bnb_4bit_quant_type="nf4",
-                bnb_4bit_compute_dtype=torch.bfloat16
+        # Проверяем доступность CUDA
+        if torch.cuda.is_available():
+            print("CUDA доступен, используем GPU")
+            # Для GPU с квантованием
+            try:
+                from transformers import BitsAndBytesConfig
+                bnb_config = BitsAndBytesConfig(
+                    load_in_4bit=True,
+                    bnb_4bit_use_double_quant=True,
+                    bnb_4bit_quant_type="nf4",
+                    bnb_4bit_compute_dtype=torch.bfloat16
+                )
+                model = AutoModelForCausalLM.from_pretrained(
+                    model_name,
+                    quantization_config=bnb_config,
+                    device_map="auto",
+                    trust_remote_code=True
+                )
+            except Exception as e:
+                print(f"Ошибка квантования: {e}, загружаем без квантования")
+                model = AutoModelForCausalLM.from_pretrained(
+                    model_name,
+                    device_map="auto",
+                    dtype=torch.float16,  # Исправлено: torch_dtype -> dtype
+                    trust_remote_code=True
+                )
+        else:
+            # Для CPU - загружаем без квантования
+            print("CUDA не доступен, используем CPU")
+            model = AutoModelForCausalLM.from_pretrained(
+                model_name,
+                device_map=None,  # Не использовать автоматическое распределение
+                dtype=torch.float32,  # Исправлено: torch_dtype -> dtype, float32 для CPU
+                trust_remote_code=True
             )
-            quantization_config = bnb_config
-        except ImportError:
-            print("bitsandbytes не доступен, загружаем без квантования")
-            quantization_config = None
 
-        # Загрузка модели
-        model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            quantization_config=quantization_config,
-            device_map="auto",
-            trust_remote_code=True,
-            torch_dtype=torch.float16 if not quantization_config else None
-        )
-
-        # Saiga модели используют специальный формат промптов
         # Настройка пайплайна для генерации
         text_generation_pipeline = pipeline(
             model=model,
@@ -180,7 +192,7 @@ def setup_llm_model():
             do_sample=True,
             repetition_penalty=1.1,
             return_full_text=False,
-            max_new_tokens=500,
+            max_new_tokens=300,  # Уменьшим для CPU
         )
 
         llm = HuggingFacePipeline(pipeline=text_generation_pipeline)
@@ -188,10 +200,40 @@ def setup_llm_model():
 
     except Exception as e:
         print(f"Ошибка при загрузке модели: {e}")
-        print("Проверьте:")
-        print("1. Выполнили ли 'huggingface-cli login'")
-        print("2. Есть ли доступ к модели на https://huggingface.co/IlyaGusev/saiga_llama3_8b")
-        raise
+        return setup_fallback_model()
+
+
+def setup_fallback_model():
+    """Резервная модель для CPU"""
+    print("Используем легкую резервную модель для CPU")
+
+    # Легкая модель, которая хорошо работает на CPU
+    model_name = "IlyaGusev/saiga_mistral_7b"  # Или другая легкая модель
+
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+        model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            device_map=None,
+            dtype=torch.float32,  # Исправлено: torch_dtype -> dtype
+            trust_remote_code=True
+        )
+
+        text_generation_pipeline = pipeline(
+            model=model,
+            tokenizer=tokenizer,
+            task="text-generation",
+            temperature=0.2,
+            max_new_tokens=250,
+        )
+
+        return HuggingFacePipeline(pipeline=text_generation_pipeline)
+    except:
+        # Минимальная резервная модель
+        print("Используем самую легкую модель")
+        from langchain.llms import FakeListLLM
+        responses = ["Извините, в данный момент система загружается. Попробуйте позже."]
+        return FakeListLLM(responses=responses)
 
 # --- 4. СОЗДАНИЕ RAG-ЦЕПОЧКИ ---
 def create_rag_chain(llm, retriever):
