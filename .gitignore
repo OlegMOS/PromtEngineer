@@ -1,0 +1,47 @@
+# Игнорирование файлов окружения
+LangChainRAG/.env
+*.env
+*.env.local
+
+# Виртуальное окружение
+.venv/
+venv/
+env/
+
+# Файлы IDE  (PyCharm)
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# Кэш Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Базы данных и журналы
+#*.sqlite3
+*.log
+
+# Тестовые отчеты и покрытие
+htmlcov/
+.coverage
+coverage.xml
+
+# Системные файлы
+Thumbs.db
+.DS_Store
+
+# Документация и сборка
+build/
+dist/
+docs/_build/
+
+# Прочие файлы из структуры проекта
+.hypothesis/
+clean_project.py
+
+# Локальные настройки PyCharm
+.idea
+.vscode/
+
