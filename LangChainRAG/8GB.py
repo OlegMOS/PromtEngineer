@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Виртуальный консультант для ювелирного магазина с использованием RAG и LangChain
 """
@@ -9,16 +8,16 @@ import chromadb
 import numpy as np
 from typing import List, Dict, Any
 import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
+from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig, pipeline
 
-# Правильные импорты для новой версии LangChain
+# Обновленные импорты для совместимости с новыми версиями LangChain
 try:
     from langchain_community.llms import HuggingFacePipeline
-
-    print("✓ langchain_community установлен")
+    from langchain_community.embeddings import HuggingFaceEmbeddings
 except ImportError:
-    print("✗ langchain_community не установлен. Установите: pip install -U langchain-community")
+    # Если langchain_community не установлен, попробуем старые импорты
     from langchain.llms import HuggingFacePipeline
+    from langchain.embeddings import HuggingFaceEmbeddings
 
 from langchain.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
@@ -30,13 +29,14 @@ import faiss
 from sentence_transformers import SentenceTransformer
 
 # --- 1. ПОДГОТОВКА ДОКУМЕНТОВ О ЮВЕЛИРНЫХ ИЗДЕЛИЯХ ---
+# Предполагаем, что у нас есть данные о ювелирных изделиях
 jewelry_documents = [
     {
         "content": "Серебряные украшения требуют особого ухода. Храните их в сухом месте, избегайте контакта с водой, химикатами и косметикой. Для очистки используйте мягкую ткань и специальные средства для серебра.",
         "metadata": {"type": "уход", "материал": "серебро"}
     },
     {
-        "content": "Золотые украшения следует хранить отдельно от других изделий. Для очистки используйте теплый мыльный раствор и мягкую щетку. Избегайте контакта с хлором и другими агрессивных химикатов.",
+        "content": "Золотые украшения следует хранить отдельно от других изделий. Для очистки используйте теплый мыльный раствор и мягкую щетку. Избегайте контакта с хлором и другими агрессивными химикатами.",
         "metadata": {"type": "уход", "материал": "золото"}
     },
     {
@@ -67,12 +67,13 @@ class VectorDatabase:
 
     def setup_faiss(self):
         """Настройка FAISS базы данных"""
-        dimension = 384
+        dimension = 384  # Размерность векторов для выбранного энкодера
         self.faiss_index = faiss.IndexFlatL2(dimension)
         self.faiss_documents = []
 
     def setup_chromadb(self):
         """Настройка ChromaDB базы данных"""
+        # Установка совместимости с SQLite для ChromaDB
         try:
             __import__('pysqlite3')
             sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
@@ -89,10 +90,12 @@ class VectorDatabase:
         ids = [f"id_{i}" for i in range(len(documents))]
 
         if self.database_type == "faiss":
+            # Для FAISS
             embeddings = self.encoder.encode(texts)
             self.faiss_index.add(np.array(embeddings).astype('float32'))
             self.faiss_documents.extend(documents)
         else:
+            # Для ChromaDB
             self.collection.add(
                 documents=texts,
                 metadatas=metadatas,
@@ -111,6 +114,7 @@ class VectorDatabase:
                     results.append(self.faiss_documents[i])
             return results
         else:
+            # Для ChromaDB
             results = self.collection.query(
                 query_texts=[query_text],
                 n_results=k
@@ -127,31 +131,56 @@ class VectorDatabase:
             return documents
 
 
-# --- 3. НАСТРОЙКА МОДЕЛИ ---
+# --- 3. НАСТРОЙКА МОДЕЛИ SAIGA LLAMA3 ---
 def setup_llm_model():
-    """Настройка модели для CPU"""
-    # Используем легкую модель, которая гарантированно работает на 8GB RAM
-    model_name = "ai-forever/rugpt3large_based_on_gpt2"
+    """Настройка модели IlyaGusev/saiga_llama3_8b для CPU"""
+    model_name = "IlyaGusev/saiga_llama3_8b"
 
     print(f"Загрузка модели: {model_name}")
 
     try:
         # Загрузка токенизатора
-        tokenizer = AutoTokenizer.from_pretrained(model_name)
-
-        # Загрузка модели с правильными параметрами
-        model = AutoModelForCausalLM.from_pretrained(
+        tokenizer = AutoTokenizer.from_pretrained(
             model_name,
-            device_map=None,  # Для CPU
-            dtype=torch.float32,  # Исправлено: torch_dtype -> dtype
-            low_cpu_mem_usage=True
+            use_fast=False,
+            trust_remote_code=True
         )
 
-        # Убедимся, что есть pad token
-        if tokenizer.pad_token is None:
-            tokenizer.pad_token = tokenizer.eos_token
-
-        print("Модель успешно загружена!")
+        # Проверяем доступность CUDA
+        if torch.cuda.is_available():
+            print("CUDA доступен, используем GPU")
+            # Для GPU с квантованием
+            try:
+                from transformers import BitsAndBytesConfig
+                bnb_config = BitsAndBytesConfig(
+                    load_in_4bit=True,
+                    bnb_4bit_use_double_quant=True,
+                    bnb_4bit_quant_type="nf4",
+                    bnb_4bit_compute_dtype=torch.bfloat16
+                )
+                model = AutoModelForCausalLM.from_pretrained(
+                    model_name,
+                    quantization_config=bnb_config,
+                    device_map="auto",
+                    trust_remote_code=True
+                )
+            except Exception as e:
+                print(f"Ошибка квантования: {e}, загружаем без квантования")
+                model = AutoModelForCausalLM.from_pretrained(
+                    model_name,
+                    device_map="auto",
+                    dtype=torch.float16,  # Исправлено: torch_dtype -> dtype
+                    trust_remote_code=True
+                )
+        else:
+            # Для CPU - загружаем без квантования
+            print("CUDA не доступен, используем CPU")
+            model = AutoModelForCausalLM.from_pretrained(
+                model_name,
+                device_map=None,  # Не использовать автоматическое распределение
+                dtype=torch.float32,  # Исправлено: torch_dtype -> dtype, float32 для CPU
+                trust_remote_code=True
+            )
 
         # Настройка пайплайна для генерации
         text_generation_pipeline = pipeline(
@@ -160,8 +189,9 @@ def setup_llm_model():
             task="text-generation",
             temperature=0.2,
             do_sample=True,
-            max_new_tokens=200,
-            pad_token_id=tokenizer.eos_token_id,
+            repetition_penalty=1.1,
+            return_full_text=False,
+            max_new_tokens=300,  # Уменьшим для CPU
         )
 
         llm = HuggingFacePipeline(pipeline=text_generation_pipeline)
@@ -169,38 +199,65 @@ def setup_llm_model():
 
     except Exception as e:
         print(f"Ошибка при загрузке модели: {e}")
-        # Возвращаем простую заглушку вместо None
         return setup_fallback_model()
 
 
 def setup_fallback_model():
-    """Простая модель-заглушка если основная не загрузилась"""
-    from langchain.llms import FakeListLLM
-    responses = [
-        "Здравствуйте! Я виртуальный консультант ювелирного магазина.",
-        "Расскажите, какие украшения вас интересуют?",
-        "Могу помочь с выбором колец, сережек или ожерелий."
-    ]
-    return FakeListLLM(responses=responses)
+    """Резервная модель для CPU"""
+    print("Используем легкую резервную модель для CPU")
 
+    # Легкая модель, которая хорошо работает на CPU
+    model_name = "IlyaGusev/saiga_mistral_7b"  # Или другая легкая модель
+
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+        model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            device_map=None,
+            dtype=torch.float32,  # Исправлено: torch_dtype -> dtype
+            trust_remote_code=True
+        )
+
+        text_generation_pipeline = pipeline(
+            model=model,
+            tokenizer=tokenizer,
+            task="text-generation",
+            temperature=0.2,
+            max_new_tokens=250,
+        )
+
+        return HuggingFacePipeline(pipeline=text_generation_pipeline)
+    except:
+        # Минимальная резервная модель
+        print("Используем самую легкую модель")
+        from langchain.llms import FakeListLLM
+        responses = ["Извините, в данный момент система загружается. Попробуйте позже."]
+        return FakeListLLM(responses=responses)
 
 # --- 4. СОЗДАНИЕ RAG-ЦЕПОЧКИ ---
 def create_rag_chain(llm, retriever):
     """Создание RAG-цепочки для обработки запросов"""
 
-    # Улучшенный шаблон промпта с четкими инструкциями
-    prompt_template = """Ты - консультант ювелирного магазина. Ответь на вопрос клиента, используя информацию ниже.
-Отвечай кратко и по делу, не повторяй вопрос и контекст дословно.
+    # Шаблон промпта для Saiga модели
+    prompt_template = """<|im_start|>system
+    Ты — виртуальный консультант ювелирного магазина. Твои задачи:
+    1. Консультировать по уходу за ювелирными изделиями на основе предоставленного контекста.
+    2. Рекомендовать товары из ассортимента магазина на основе запросов клиентов.
+    3. Быть вежливым, дружелюбным и профессиональным.
 
-Контекст по уходу за украшениями:
-{care_context}
+    Отвечай только на основе предоставленного контекста. Если в контексте нет информации для ответа, 
+    вежливо сообщи, что не можешь помочь с этим вопросом и предложи уточнить запрос или обратиться 
+    к менеджеру магазина.
 
-Ассортимент товаров:
-{products_context}
+    Контекст для консультации по уходу:
+    {care_context}
 
-Вопрос клиента: {question}
-
-Ответ:"""
+    Контекст с товарами:
+    {products_context}<|im_end|>
+    <|im_start|>user
+    {question}<|im_end|>
+    <|im_start|>assistant
+    """
 
     prompt = PromptTemplate(
         input_variables=["care_context", "products_context", "question"],
@@ -213,11 +270,10 @@ def create_rag_chain(llm, retriever):
         product_docs = []
 
         for doc in docs:
-            if isinstance(doc, dict) and 'metadata' in doc and 'content' in doc:
-                if doc['metadata'].get('type') == 'уход':
-                    care_docs.append(doc['content'])
-                elif doc['metadata'].get('type') == 'товар':
-                    product_docs.append(doc['content'])
+            if doc['metadata'].get('type') == 'уход':
+                care_docs.append(doc['content'])
+            elif doc['metadata'].get('type') == 'товар':
+                product_docs.append(doc['content'])
 
         care_context = "\n".join(care_docs) if care_docs else "Информация по уходу отсутствует."
         products_context = "\n".join(product_docs) if product_docs else "Информация о товарах отсутствует."
@@ -227,70 +283,23 @@ def create_rag_chain(llm, retriever):
             "products_context": products_context
         }
 
-    # Создаем цепочку с проверкой ошибок
-    def rag_chain(input_dict):
-        try:
-            question = input_dict["question"]
-            docs = retriever(question)
-
-            contexts = split_contexts(docs)
-
-            # Формируем промпт
-            formatted_prompt = prompt.format(
-                question=question,
-                care_context=contexts["care_context"],
-                products_context=contexts["products_context"]
-            )
-
-            # Генерируем ответ
-            if hasattr(llm, 'invoke'):
-                response = llm.invoke(formatted_prompt)
-            else:
-                response = llm(formatted_prompt)
-
-            # Очищаем ответ от повторений
-            cleaned_response = clean_response(response)
-            return cleaned_response
-
-        except Exception as e:
-            return f"Извините, произошла ошибка при обработке запроса: {str(e)}"
+    # Создание цепочки
+    rag_chain = (
+            {
+                "docs": lambda x: retriever(x["question"]),
+                "question": lambda x: x["question"]
+            }
+            | {
+                "care_context": lambda x: split_contexts(x["docs"])["care_context"],
+                "products_context": lambda x: split_contexts(x["docs"])["products_context"],
+                "question": lambda x: x["question"]
+            }
+            | prompt
+            | llm
+            | StrOutputParser()
+    )
 
     return rag_chain
-
-
-def clean_response(response):
-    """Очистка ответа от повторяющихся частей"""
-    # Удаляем возможные повторения вопроса и контекста
-    lines = response.split('\n')
-    cleaned_lines = []
-
-    # Ищем начало настоящего ответа
-    for line in lines:
-        # Пропускаем пустые строки
-        if not line.strip():
-            continue
-
-        # Пропускаем строки с маркерами контекста
-        if any(marker in line for marker in ["Контекст по уходу", "Ассортимент товаров", "Вопрос клиента"]):
-            continue
-
-        # Если нашли начало ответа после маркера
-        if "Ответ:" in line:
-            line = line.replace("Ответ:", "").strip()
-            if line:
-                cleaned_lines.append(line)
-            continue
-
-        # Добавляем остальные строки
-        cleaned_lines.append(line)
-
-    cleaned_response = "\n".join(cleaned_lines).strip()
-
-    # Если ответ слишком длинный, обрезаем его
-    if len(cleaned_response) > 500:
-        cleaned_response = cleaned_response[:500] + "..."
-
-    return cleaned_response if cleaned_response else "Извините, не могу найти информацию по вашему запросу."
 
 
 # --- 5. ТЕСТИРОВАНИЕ СИСТЕМЫ ---
@@ -300,6 +309,8 @@ def test_consultant(rag_chain):
         "Как ухаживать за серебряными украшениями?",
         "Посоветуйте кольцо с бриллиантом для помолвки",
         "Что у вас есть из жемчужных украшений?",
+        "Как чистить золотые украшения?",
+        "Расскажите о ваших серебряных серьгах"
     ]
 
     print("=== ТЕСТИРОВАНИЕ ВИРТУАЛЬНОГО КОНСУЛЬТАНТА ===\n")
@@ -307,8 +318,7 @@ def test_consultant(rag_chain):
     for i, question in enumerate(test_questions, 1):
         print(f"{i}. Вопрос: {question}")
         try:
-            # Вызываем как функцию, а не метод invoke
-            response = rag_chain({"question": question})
+            response = rag_chain.invoke({"question": question})
             print(f"Ответ: {response}\n")
         except Exception as e:
             print(f"Ошибка при обработке вопроса: {e}\n")
@@ -320,9 +330,9 @@ def main():
     """Основная функция программы"""
     print("Инициализация виртуального консультанта для ювелирного магазина...")
 
-    # 1. Инициализация базы данных
+    # 1. Инициализация базы данных (можно выбрать "faiss" или "chroma")
     print("Настройка базы данных...")
-    db = VectorDatabase(database_type="chroma")
+    db = VectorDatabase(database_type="chroma")  # Можно изменить на "faiss"
 
     # 2. Добавление документов в базу данных
     print("Добавление документов о ювелирных изделиях...")
@@ -330,15 +340,16 @@ def main():
 
     # 3. Создание функции для поиска
     def retriever(query):
-        return db.query(query, k=3)
+        return db.query(query, k=5)
 
-    # 4. Настройка модели
-    print("Загрузка модели...")
+    # 4. Настройка модели Llama3
+    print("Загрузка модели Llama3...")
     try:
         llm = setup_llm_model()
     except Exception as e:
-        print(f"Не удалось загрузить модель: {e}")
-        llm = setup_fallback_model()
+        print(f"Ошибка при загрузке модели: {e}")
+        print("Проверьте доступ к модели и наличие необходимых зависимостей.")
+        return
 
     # 5. Создание RAG-цепочки
     print("Создание RAG-цепочки...")
@@ -348,7 +359,7 @@ def main():
     print("Запуск тестирования...")
     test_consultant(rag_chain)
 
-    # 7. Интерактивный режим
+    # 7. Пример интерактивного режима
     print("=== РЕЖИМ ВЗАИМОДЕЙСТВИЯ ===")
     print("Введите ваш вопрос (или 'выход' для завершения):")
 
@@ -361,11 +372,11 @@ def main():
 
         if user_input:
             try:
-                # Вызываем как функцию, а не метод invoke
-                response = rag_chain({"question": user_input})
+                response = rag_chain.invoke({"question": user_input})
                 print(f"\nКонсультант: {response}")
             except Exception as e:
                 print(f"Произошла ошибка: {e}")
+
 
 if __name__ == "__main__":
     main()
