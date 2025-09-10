@@ -1,371 +1,313 @@
 # -*- coding: utf-8 -*-
 """
-Виртуальный консультант для ювелирного магазина с использованием RAG и LangChain
+Виртуальный консультант для ювелирного магазина с использованием RAG
+Поддерживает обе базы данных (FAISS и ChromaDB) и работает на CPU с ограниченной памятью
 """
+
 import os
-import sys
 import json
+import sys
+from typing import List, Dict, Any
+from uuid import uuid4
+
+# Установка совместимости с SQLite для ChromaDB (если нужно)
+try:
+    __import__('pysqlite3')
+    sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
+except ImportError:
+    pass
+
+# Импорт библиотек для векторных баз данных
 import chromadb
 import numpy as np
-from typing import List, Dict, Any
-import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
-
-# Правильные импорты для новой версии LangChain
-try:
-    from langchain_community.llms import HuggingFacePipeline
-
-    print("✓ langchain_community установлен")
-except ImportError:
-    print("✗ langchain_community не установлен. Установите: pip install -U langchain-community")
-    from langchain.llms import HuggingFacePipeline
-
-from langchain.prompts import PromptTemplate
-from langchain_core.output_parsers import StrOutputParser
-from langchain_core.runnables import RunnablePassthrough
-from langchain.chains import LLMChain
-from langchain.schema import Document
-from langchain.text_splitter import RecursiveCharacterTextSplitter
 import faiss
-from sentence_transformers import SentenceTransformer
 
-# --- 1. ПОДГОТОВКА ДОКУМЕНТОВ О ЮВЕЛИРНЫХ ИЗДЕЛИЯХ ---
-jewelry_documents = [
-    {
-        "content": "Серебряные украшения требуют особого ухода. Храните их в сухом месте, избегайте контакта с водой, химикатами и косметикой. Для очистки используйте мягкую ткань и специальные средства для серебра.",
-        "metadata": {"type": "уход", "материал": "серебро"}
-    },
-    {
-        "content": "Золотые украшения следует хранить отдельно от других изделий. Для очистки используйте теплый мыльный раствор и мягкую щетку. Избегайте контакта с хлором и другими агрессивных химикатов.",
-        "metadata": {"type": "уход", "материал": "золото"}
-    },
-    {
-        "content": "Кольцо с бриллиантом 'Нежность': изготовлено из белого золота 585 пробы, содержит бриллиант 0.5 карата. Идеально для помолвки. Цена: 45,000 рублей.",
-        "metadata": {"type": "товар", "категория": "кольцо", "материал": "белое золото", "камень": "бриллиант"}
-    },
-    {
-        "content": "Серебряные серьги 'Лунный свет': изящный дизайн с фианитами. Подходят для повседневной носки и особых occasions. Цена: 5,500 рублей.",
-        "metadata": {"type": "товар", "категория": "серьги", "материал": "серебро", "камень": "фианит"}
-    },
-    {
-        "content": "Жемчужное ожерелье 'Жемчужина': культивированный жемчуг высшего качества, длина 45 см. Элегантное украшение для вечерних мероприятий. Цена: 22,000 рублей.",
-        "metadata": {"type": "товар", "категория": "ожерелье", "материал": "жемчуг"}
-    }
-]
+# Исправленные импорты для новых версий LangChain
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain.prompts import PromptTemplate
+from langchain.chains import LLMChain
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.documents import Document
+
+# Для работы с более простой моделью
+from transformers import pipeline
 
 
-# --- 2. НАСТРОЙКА БАЗ ДАННЫХ (FAISS и ChromaDB) ---
-class VectorDatabase:
-    def __init__(self, database_type="chroma"):
-        self.database_type = database_type
-        self.encoder = SentenceTransformer("sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
+class JewelryConsultant:
+    def __init__(self):
+        # Модель для эмбеддингов, которая хорошо работает с русским языком
+        self.embedding_model = HuggingFaceEmbeddings(
+            model_name="cointegrated/LaBSE-en-ru",
+            model_kwargs={'device': 'cpu'}
+        )
 
-        if database_type == "faiss":
-            self.setup_faiss()
+        # Данные для базы знаний
+        self.jewelry_documents = [
+            {
+                "content": "Серебряные украшения требуют особого ухода. Храните их в сухом месте, избегайте контакта с водой, химикатами и косметикой. Для очистки используйте мягкую ткань и специальные средства для серебра.",
+                "metadata": {"type": "уход", "материал": "серебро"}
+            },
+            {
+                "content": "Золотые украшения следует хранить отдельно от других изделий. Для очистки используйте теплый мыльный раствор и мягкую щетку. Избегайте контакта с хлором и другими агрессивными химикатами.",
+                "metadata": {"type": "уход", "материал": "золото"}
+            },
+            {
+                "content": "Жемчужные украшения боятся сухости и прямых солнечных лучей. Храните их в отдельной шкатулке с мягкой тканью. Для очистки используйте только влажную мягкую ткань.",
+                "metadata": {"type": "уход", "материал": "жемчуг"}
+            }
+        ]
+
+        # Каталог товаров
+        self.catalog = [
+            {
+                "name": "Кольцо с бриллиантом 'Нежность'",
+                "description": "Изготовлено из белого золота 585 пробы, содержит бриллиант 0.5 карата.",
+                "usage": "Идеально для помолвки",
+                "price": "45,000 рублей",
+                "url": "https://example.com/product/1"
+            },
+            {
+                "name": "Серебряные серьги 'Лунный свет'",
+                "description": "Изящный дизайн с фианитами. Подходят для повседневной носки.",
+                "usage": "Для повседневного использования и особых случаев",
+                "price": "5,500 рублей",
+                "url": "https://example.com/product/2"
+            }
+        ]
+
+        # Инициализация языковой модели
+        self.llm = self.setup_llm()
+
+        # Инициализация промпта
+        self.prompt = self.setup_prompt()
+
+        # Инициализация цепочки
+        self.llm_chain = LLMChain(
+            llm=self.llm,
+            prompt=self.prompt,
+            output_parser=StrOutputParser()
+        )
+
+    def setup_llm(self):
+        """Настройка языковой модели для работы на CPU с ограниченной памятью"""
+        # Используем небольшую модель, которая хорошо работает на CPU и с русским языком
+        # Модель rugpt3small достаточно легкая для работы на CPU с 8 ГБ памяти
+        text_generator = pipeline(
+            "text-generation",
+            model="sberbank-ai/rugpt3small_based_on_gpt2",
+            tokenizer="sberbank-ai/rugpt3small_based_on_gpt2",
+            device=-1,  # -1 для CPU, 0 для GPU
+            max_new_tokens=150,
+            temperature=0.7,
+            do_sample=True,
+            pad_token_id=50256  # Добавляем pad_token_id
+        )
+
+        # Создаем обертку для использования с LangChain
+        from langchain.llms import HuggingFacePipeline
+        return HuggingFacePipeline(pipeline=text_generator)
+
+    def setup_prompt(self):
+        """Настройка промпт-шаблона"""
+        prompt_template = """
+Ты — виртуальный консультант ювелирного магазина. Твои задачи:
+1. Консультировать по уходу за ювелирными изделиями на основе предоставленного контекста.
+2. Рекомендовать товары из ассортимента магазина на основе запросов клиентов.
+3. Быть вежливым, дружелюбным и профессиональным.
+
+Отвечай только на основе предоставленного контекста. Если в контексте нет информации для ответа, 
+вежливо сообщи, что не можешь помочь с этим вопросом и предложи уточнить запрос или обратиться 
+к менеджеру магазина.
+
+Контекст для консультации по уходу:
+{care_context}
+
+Контекст с товарами:
+{products_context}
+
+Вопрос: {question}
+
+Ответ:
+"""
+
+        return PromptTemplate(
+            input_variables=["care_context", "products_context", "question"],
+            template=prompt_template,
+        )
+
+    def setup_vector_db(self, db_type="chroma"):
+        """Настройка векторной базы данных (ChromaDB или FAISS)"""
+        if db_type == "chroma":
+            return self.setup_chromadb()
         else:
-            self.setup_chromadb()
-
-    def setup_faiss(self):
-        """Настройка FAISS базы данных"""
-        dimension = 384
-        self.faiss_index = faiss.IndexFlatL2(dimension)
-        self.faiss_documents = []
+            return self.setup_faiss()
 
     def setup_chromadb(self):
         """Настройка ChromaDB базы данных"""
-        try:
-            __import__('pysqlite3')
-            sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
-        except ImportError:
-            print("pysqlite3 не установлен, используем стандартный sqlite3")
+        # Клиент ChromaDB
+        chroma_client = chromadb.PersistentClient(path="./chroma_db")
 
-        self.chroma_client = chromadb.PersistentClient(path="./chroma_db")
-        self.collection = self.chroma_client.get_or_create_collection(name="jewelry_collection")
+        # Коллекция для информации по уходу
+        support_collection = chroma_client.get_or_create_collection(name="support_collection")
 
-    def add_documents(self, documents: List[Dict]):
-        """Добавление документов в выбранную базу данных"""
-        texts = [doc["content"] for doc in documents]
-        metadatas = [doc["metadata"] for doc in documents]
-        ids = [f"id_{i}" for i in range(len(documents))]
-
-        if self.database_type == "faiss":
-            embeddings = self.encoder.encode(texts)
-            self.faiss_index.add(np.array(embeddings).astype('float32'))
-            self.faiss_documents.extend(documents)
-        else:
-            self.collection.add(
-                documents=texts,
-                metadatas=metadatas,
-                ids=ids
+        # Добавление документов по уходу
+        for i, doc in enumerate(self.jewelry_documents):
+            support_collection.add(
+                ids=[f"doc_{i}"],
+                documents=[doc["content"]],
+                metadatas=[doc["metadata"]]
             )
 
-    def query(self, query_text: str, k: int = 3):
-        """Поиск релевантных документов"""
-        if self.database_type == "faiss":
-            query_embedding = self.encoder.encode([query_text])
-            distances, indices = self.faiss_index.search(np.array(query_embedding).astype('float32'), k)
+        # Коллекция для каталога товаров
+        catalog_collection = chroma_client.get_or_create_collection(name="catalog_collection")
 
-            results = []
-            for i in indices[0]:
-                if i < len(self.faiss_documents):
-                    results.append(self.faiss_documents[i])
-            return results
-        else:
-            results = self.collection.query(
-                query_texts=[query_text],
-                n_results=k
+        # Добавление товаров в каталог
+        for i, item in enumerate(self.catalog):
+            text = f"{item['name']}: {item['description']} Назначение: {item['usage']} Цена: {item['price']}"
+            catalog_collection.add(
+                ids=[f"prod_{i}"],
+                documents=[text],
+                metadatas=[{
+                    "name": item['name'],
+                    "price": item['price'],
+                    "url": item['url']
+                }]
             )
-
-            documents = []
-            for i in range(len(results['documents'][0])):
-                doc_content = results['documents'][0][i]
-                doc_metadata = results['metadatas'][0][i]
-                documents.append({
-                    "content": doc_content,
-                    "metadata": doc_metadata
-                })
-            return documents
-
-
-# --- 3. НАСТРОЙКА МОДЕЛИ ---
-def setup_llm_model():
-    """Настройка модели для CPU"""
-    # Используем легкую модель, которая гарантированно работает на 8GB RAM
-    model_name = "ai-forever/rugpt3large_based_on_gpt2"
-
-    print(f"Загрузка модели: {model_name}")
-
-    try:
-        # Загрузка токенизатора
-        tokenizer = AutoTokenizer.from_pretrained(model_name)
-
-        # Загрузка модели с правильными параметрами
-        model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            device_map=None,  # Для CPU
-            dtype=torch.float32,  # Исправлено: torch_dtype -> dtype
-            low_cpu_mem_usage=True
-        )
-
-        # Убедимся, что есть pad token
-        if tokenizer.pad_token is None:
-            tokenizer.pad_token = tokenizer.eos_token
-
-        print("Модель успешно загружена!")
-
-        # Настройка пайплайна для генерации
-        text_generation_pipeline = pipeline(
-            model=model,
-            tokenizer=tokenizer,
-            task="text-generation",
-            temperature=0.2,
-            do_sample=True,
-            max_new_tokens=200,
-            pad_token_id=tokenizer.eos_token_id,
-        )
-
-        llm = HuggingFacePipeline(pipeline=text_generation_pipeline)
-        return llm
-
-    except Exception as e:
-        print(f"Ошибка при загрузке модели: {e}")
-        # Возвращаем простую заглушку вместо None
-        return setup_fallback_model()
-
-
-def setup_fallback_model():
-    """Простая модель-заглушка если основная не загрузилась"""
-    from langchain.llms import FakeListLLM
-    responses = [
-        "Здравствуйте! Я виртуальный консультант ювелирного магазина.",
-        "Расскажите, какие украшения вас интересуют?",
-        "Могу помочь с выбором колец, сережек или ожерелий."
-    ]
-    return FakeListLLM(responses=responses)
-
-
-# --- 4. СОЗДАНИЕ RAG-ЦЕПОЧКИ ---
-def create_rag_chain(llm, retriever):
-    """Создание RAG-цепочки для обработки запросов"""
-
-    # Улучшенный шаблон промпта с четкими инструкциями
-    prompt_template = """Ты - консультант ювелирного магазина. Ответь на вопрос клиента, используя информацию ниже.
-Отвечай кратко и по делу, не повторяй вопрос и контекст дословно.
-
-Контекст по уходу за украшениями:
-{care_context}
-
-Ассортимент товаров:
-{products_context}
-
-Вопрос клиента: {question}
-
-Ответ:"""
-
-    prompt = PromptTemplate(
-        input_variables=["care_context", "products_context", "question"],
-        template=prompt_template,
-    )
-
-    # Функция для разделения документов на контекст ухода и товары
-    def split_contexts(docs):
-        care_docs = []
-        product_docs = []
-
-        for doc in docs:
-            if isinstance(doc, dict) and 'metadata' in doc and 'content' in doc:
-                if doc['metadata'].get('type') == 'уход':
-                    care_docs.append(doc['content'])
-                elif doc['metadata'].get('type') == 'товар':
-                    product_docs.append(doc['content'])
-
-        care_context = "\n".join(care_docs) if care_docs else "Информация по уходу отсутствует."
-        products_context = "\n".join(product_docs) if product_docs else "Информация о товарах отсутствует."
 
         return {
-            "care_context": care_context,
-            "products_context": products_context
+            "type": "chroma",
+            "support": support_collection,
+            "catalog": catalog_collection
         }
 
-    # Создаем цепочку с проверкой ошибок
-    def rag_chain(input_dict):
-        try:
-            question = input_dict["question"]
-            docs = retriever(question)
+    def setup_faiss(self):
+        """Настройка FAISS базы данных"""
+        # Создание индексов FAISS
+        dimension = 768  # Размерность эмбеддингов LaBSE
 
-            contexts = split_contexts(docs)
+        # Индекс для информации по уходу
+        care_index = faiss.IndexFlatL2(dimension)
+        care_documents = []
+        care_metadatas = []
 
-            # Формируем промпт
-            formatted_prompt = prompt.format(
-                question=question,
-                care_context=contexts["care_context"],
-                products_context=contexts["products_context"]
-            )
+        # Индекс для каталога товаров
+        catalog_index = faiss.IndexFlatL2(dimension)
+        catalog_documents = []
+        catalog_metadatas = []
 
-            # Генерируем ответ
-            if hasattr(llm, 'invoke'):
-                response = llm.invoke(formatted_prompt)
+        # Добавление документов по уходу
+        for doc in self.jewelry_documents:
+            embedding = self.embedding_model.embed_query(doc["content"])
+            care_index.add(np.array([embedding]).astype('float32'))
+            care_documents.append(doc["content"])
+            care_metadatas.append(doc["metadata"])
+
+        # Добавление товаров в каталог
+        for item in self.catalog:
+            text = f"{item['name']}: {item['description']} Назначение: {item['usage']} Цена: {item['price']}"
+            embedding = self.embedding_model.embed_query(text)
+            catalog_index.add(np.array([embedding]).astype('float32'))
+            catalog_documents.append(text)
+            catalog_metadatas.append({
+                "name": item['name'],
+                "price": item['price'],
+                "url": item['url']
+            })
+
+        return {
+            "type": "faiss",
+            "care_index": care_index,
+            "care_documents": care_documents,
+            "care_metadatas": care_metadatas,
+            "catalog_index": catalog_index,
+            "catalog_documents": catalog_documents,
+            "catalog_metadatas": catalog_metadatas
+        }
+
+    def query_database(self, db, query_text, n_results=3, search_type="care"):
+        """Поиск релевантных документов в выбранной базе данных"""
+        if db["type"] == "chroma":
+            if search_type == "care":
+                results = db["support"].query(
+                    query_texts=[query_text],
+                    n_results=n_results
+                )
+                return results["documents"][0] if results["documents"] else []
             else:
-                response = llm(formatted_prompt)
+                results = db["catalog"].query(
+                    query_texts=[query_text],
+                    n_results=n_results
+                )
+                return results["documents"][0] if results["documents"] else []
+        else:
+            # Поиск в FAISS
+            query_embedding = self.embedding_model.embed_query(query_text)
 
-            # Очищаем ответ от повторений
-            cleaned_response = clean_response(response)
-            return cleaned_response
+            if search_type == "care":
+                distances, indices = db["care_index"].search(
+                    np.array([query_embedding]).astype('float32'),
+                    n_results
+                )
+                return [db["care_documents"][i] for i in indices[0] if i < len(db["care_documents"])]
+            else:
+                distances, indices = db["catalog_index"].search(
+                    np.array([query_embedding]).astype('float32'),
+                    n_results
+                )
+                return [db["catalog_documents"][i] for i in indices[0] if i < len(db["catalog_documents"])]
 
-        except Exception as e:
-            return f"Извините, произошла ошибка при обработке запроса: {str(e)}"
+    def get_response(self, db, question):
+        """Получение ответа от консультанта"""
+        # Поиск релевантной информации
+        care_context = self.query_database(db, question, 3, "care")
+        products_context = self.query_database(db, question, 2, "catalog")
 
-    return rag_chain
+        # Форматирование контекста
+        care_text = "\n".join(care_context) if care_context else "Информация по уходу отсутствует."
+        products_text = "\n".join(products_context) if products_context else "Информация о товарах отсутствует."
 
+        # Генерация ответа
+        response = self.llm_chain.run({
+            "care_context": care_text,
+            "products_context": products_text,
+            "question": question
+        })
 
-def clean_response(response):
-    """Очистка ответа от повторяющихся частей"""
-    # Удаляем возможные повторения вопроса и контекста
-    lines = response.split('\n')
-    cleaned_lines = []
+        return response
 
-    # Ищем начало настоящего ответа
-    for line in lines:
-        # Пропускаем пустые строки
-        if not line.strip():
-            continue
+    def interactive_mode(self):
+        """Интерактивный режим работы с консультантом"""
+        print("=== ВИРТУАЛЬНЫЙ КОНСУЛЬТАНТ ЮВЕЛИРНОГО МАГАЗИНА ===")
+        print("Выберите тип базы данных:")
+        print("1. ChromaDB")
+        print("2. FAISS")
 
-        # Пропускаем строки с маркерами контекста
-        if any(marker in line for marker in ["Контекст по уходу", "Ассортимент товаров", "Вопрос клиента"]):
-            continue
+        db_choice = input("Введите номер (1 или 2): ").strip()
+        db_type = "chroma" if db_choice == "1" else "faiss"
 
-        # Если нашли начало ответа после маркера
-        if "Ответ:" in line:
-            line = line.replace("Ответ:", "").strip()
-            if line:
-                cleaned_lines.append(line)
-            continue
+        # Инициализация базы данных
+        print(f"Инициализация {db_type.upper()} базы данных...")
+        db = self.setup_vector_db(db_type)
 
-        # Добавляем остальные строки
-        cleaned_lines.append(line)
+        print("База данных готова к работе!")
+        print("Введите ваш вопрос (или 'выход' для завершения):")
 
-    cleaned_response = "\n".join(cleaned_lines).strip()
+        while True:
+            user_input = input("\nВаш вопрос: ").strip()
 
-    # Если ответ слишком длинный, обрезаем его
-    if len(cleaned_response) > 500:
-        cleaned_response = cleaned_response[:500] + "..."
+            if user_input.lower() in ['выход', 'exit', 'quit']:
+                print("Завершение работы виртуального консультанта.")
+                break
 
-    return cleaned_response if cleaned_response else "Извините, не могу найти информацию по вашему запросу."
-
-
-# --- 5. ТЕСТИРОВАНИЕ СИСТЕМЫ ---
-def test_consultant(rag_chain):
-    """Тестирование виртуального консультанта"""
-    test_questions = [
-        "Как ухаживать за серебряными украшениями?",
-        "Посоветуйте кольцо с бриллиантом для помолвки",
-        "Что у вас есть из жемчужных украшений?",
-    ]
-
-    print("=== ТЕСТИРОВАНИЕ ВИРТУАЛЬНОГО КОНСУЛЬТАНТА ===\n")
-
-    for i, question in enumerate(test_questions, 1):
-        print(f"{i}. Вопрос: {question}")
-        try:
-            # Вызываем как функцию, а не метод invoke
-            response = rag_chain({"question": question})
-            print(f"Ответ: {response}\n")
-        except Exception as e:
-            print(f"Ошибка при обработке вопроса: {e}\n")
-        print("-" * 80 + "\n")
+            if user_input:
+                try:
+                    response = self.get_response(db, user_input)
+                    print(f"\nКонсультант: {response}")
+                except Exception as e:
+                    print(f"Произошла ошибка: {e}")
 
 
-# --- ОСНОВНАЯ ПРОГРАММА ---
-def main():
-    """Основная функция программы"""
-    print("Инициализация виртуального консультанта для ювелирного магазина...")
-
-    # 1. Инициализация базы данных
-    print("Настройка базы данных...")
-    db = VectorDatabase(database_type="chroma")
-
-    # 2. Добавление документов в базу данных
-    print("Добавление документов о ювелирных изделиях...")
-    db.add_documents(jewelry_documents)
-
-    # 3. Создание функции для поиска
-    def retriever(query):
-        return db.query(query, k=3)
-
-    # 4. Настройка модели
-    print("Загрузка модели...")
-    try:
-        llm = setup_llm_model()
-    except Exception as e:
-        print(f"Не удалось загрузить модель: {e}")
-        llm = setup_fallback_model()
-
-    # 5. Создание RAG-цепочки
-    print("Создание RAG-цепочки...")
-    rag_chain = create_rag_chain(llm, retriever)
-
-    # 6. Тестирование консультанта
-    print("Запуск тестирования...")
-    test_consultant(rag_chain)
-
-    # 7. Интерактивный режим
-    print("=== РЕЖИМ ВЗАИМОДЕЙСТВИЯ ===")
-    print("Введите ваш вопрос (или 'выход' для завершения):")
-
-    while True:
-        user_input = input("\nВаш вопрос: ").strip()
-
-        if user_input.lower() in ['выход', 'exit', 'quit']:
-            print("Завершение работы виртуального консультанта.")
-            break
-
-        if user_input:
-            try:
-                # Вызываем как функцию, а не метод invoke
-                response = rag_chain({"question": user_input})
-                print(f"\nКонсультант: {response}")
-            except Exception as e:
-                print(f"Произошла ошибка: {e}")
-
+# Запуск консультанта
 if __name__ == "__main__":
-    main()
+    consultant = JewelryConsultant()
+    consultant.interactive_mode()
