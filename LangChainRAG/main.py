@@ -1,12 +1,13 @@
 # -*- coding: utf-8 -*-
 """
 Виртуальный консультант для ювелирного магазина с использованием RAG
-Поддерживает обе базы данных (FAISS и ChromaDB) и работает на CPU с ограниченной памятью
+Поддерживает обе базы данных (ChromaDB и FAISS) и работает на CPU с ограниченной памятью
 """
 
 import os
 import json
 import sys
+import re
 from typing import List, Dict, Any
 from uuid import uuid4
 
@@ -29,7 +30,7 @@ from langchain.chains import LLMChain
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.documents import Document
 
-# Для работы с более простой моделью
+# Для работы с более простой модели
 from transformers import pipeline
 
 
@@ -50,28 +51,28 @@ class JewelryConsultant:
             {
                 "content": "Золотые украшения следует хранить отдельно от других изделий. Для очистки используйте теплый мыльный раствор и мягкую щетку. Избегайте контакта с хлором и другими агрессивными химикатами.",
                 "metadata": {"type": "уход", "материал": "золото"}
-            },
-            {
-                "content": "Жемчужные украшения боятся сухости и прямых солнечных лучей. Храните их в отдельной шкатулке с мягкой тканью. Для очистки используйте только влажную мягкую ткань.",
-                "metadata": {"type": "уход", "материал": "жемчуг"}
             }
         ]
 
         # Каталог товаров
         self.catalog = [
-            {
-                "name": "Кольцо с бриллиантом 'Нежность'",
-                "description": "Изготовлено из белого золота 585 пробы, содержит бриллиант 0.5 карата.",
-                "usage": "Идеально для помолвки",
-                "price": "45,000 рублей",
-                "url": "https://example.com/product/1"
+           {
+                "name": "Золотое кольцо 'Элегантность'",
+                "description": "Классическое золотое кольцо 585 пробы с гравировкой.",
+                "usage": "Для повседневной носки.",
+                "price": "25,000 рублей.",
+                "url": "https://example.com/product/3",
+                "material": "золото",
+                "category": "кольцо"
             },
             {
-                "name": "Серебряные серьги 'Лунный свет'",
-                "description": "Изящный дизайн с фианитами. Подходят для повседневной носки.",
-                "usage": "Для повседневного использования и особых случаев",
-                "price": "5,500 рублей",
-                "url": "https://example.com/product/2"
+                "name": "Серебряное кольцо 'Минимализм'",
+                "description": "Простое и элегантное серебряное кольцо с минималистичным дизайном.",
+                "usage": "Для повседневной носки.",
+                "price": "3,500 рублей.",
+                "url": "https://example.com/product/4",
+                "material": "серебро",
+                "category": "кольцо"
             }
         ]
 
@@ -97,43 +98,83 @@ class JewelryConsultant:
             model="sberbank-ai/rugpt3small_based_on_gpt2",
             tokenizer="sberbank-ai/rugpt3small_based_on_gpt2",
             device=-1,  # -1 для CPU, 0 для GPU
-            max_new_tokens=150,
-            temperature=0.7,
+            max_new_tokens=1,  # Уменьшили количество токенов для более точных ответов
+            temperature=0.1,  # Уменьшили температуру для более детерминированных ответов
             do_sample=True,
-            pad_token_id=50256  # Добавляем pad_token_id
+            pad_token_id=50256,  # Добавляем pad_token_id
+            repetition_penalty=1.2  # Добавили штраф за повторения
         )
 
         # Создаем обертку для использования с LangChain
-        from langchain.llms import HuggingFacePipeline
+        from langchain_community.llms import HuggingFacePipeline
         return HuggingFacePipeline(pipeline=text_generator)
 
     def setup_prompt(self):
         """Настройка промпт-шаблона"""
         prompt_template = """
-Ты — виртуальный консультант ювелирного магазина. Твои задачи:
-1. Консультировать по уходу за ювелирными изделиями на основе предоставленного контекста.
-2. Рекомендовать товары из ассортимента магазина на основе запросов клиентов.
-3. Быть вежливым, дружелюбным и профессиональным.
+Ты — виртуальный консультант ювелирного магазина. Отвечай на вопросы клиентов одним предложением, используя только предоставленную информацию.
+Будь точным и конкретным. Если информации для ответа недостаточно, вежливо скажи об этом.
 
-Отвечай только на основе предоставленного контекста. Если в контексте нет информации для ответа, 
-вежливо сообщи, что не можешь помочь с этим вопросом и предложи уточнить запрос или обратиться 
-к менеджеру магазина.
-
-Контекст для консультации по уходу:
 {care_context}
 
-Контекст с товарами:
 {products_context}
 
-Вопрос: {question}
-
-Ответ:
 """
 
         return PromptTemplate(
             input_variables=["care_context", "products_context", "question"],
             template=prompt_template,
         )
+
+    def clean_response(self, response, question):
+        """Очистка ответа от промпта, контекста и повторения вопроса"""
+        # Удаляем все, что может быть повторением промпта
+        patterns_to_remove = [
+            r"Ты — виртуальный консультант ювелирного магазина\.",
+            r"Отвечай на вопросы клиентов одним предложением, используя только предоставленную информацию\.",
+            r"Будь точным и конкретным\.",
+            r"Если информации для ответа недостаточно, вежливо скажи об этом\.",
+            r"Вопрос:",
+            r"Ответ:",
+            r"\(только факты из контекста, без повторения вопроса\)",
+            # Удаляем повторение вопроса пользователя
+            re.escape(question)
+        ]
+
+        for pattern in patterns_to_remove:
+            response = re.sub(pattern, '', response, flags=re.IGNORECASE)
+
+        # Удаляем лишние пробелы и переносы строк
+        response = re.sub(r'\s+', ' ', response).strip()
+
+        # Если ответ начинается с кавычек или других ненужных символов, удаляем их
+        response = re.sub(r'^["\':\s]+', '', response)
+
+        # Удаляем повторяющиеся фразы
+        response = self.remove_repetitions(response)
+
+        return response
+
+    def remove_repetitions(self, text):
+        """Удаление повторяющихся фраз из текста"""
+        # Разделяем текст на предложения
+        sentences = re.split(r'[.!?]', text)
+        sentences = [s.strip() for s in sentences if s.strip()]
+
+        # Удаляем дубликаты предложений
+        unique_sentences = []
+        seen_sentences = set()
+
+        for sentence in sentences:
+            # Нормализуем предложение для сравнения (приводим к нижнему регистру и удаляем лишние пробелы)
+            normalized = re.sub(r'\s+', ' ', sentence.lower()).strip()
+
+            if normalized not in seen_sentences:
+                seen_sentences.add(normalized)
+                unique_sentences.append(sentence)
+
+        # Собираем текст обратно
+        return '. '.join(unique_sentences) + '.' if unique_sentences else text
 
     def setup_vector_db(self, db_type="chroma"):
         """Настройка векторной базы данных (ChromaDB или FAISS)"""
@@ -170,7 +211,9 @@ class JewelryConsultant:
                 metadatas=[{
                     "name": item['name'],
                     "price": item['price'],
-                    "url": item['url']
+                    "url": item['url'],
+                    "material": item['material'],
+                    "category": item['category']
                 }]
             )
 
@@ -211,7 +254,9 @@ class JewelryConsultant:
             catalog_metadatas.append({
                 "name": item['name'],
                 "price": item['price'],
-                "url": item['url']
+                "url": item['url'],
+                "material": item['material'],
+                "category": item['category']
             })
 
         return {
@@ -224,20 +269,40 @@ class JewelryConsultant:
             "catalog_metadatas": catalog_metadatas
         }
 
-    def query_database(self, db, query_text, n_results=3, search_type="care"):
+    def query_database(self, db, query_text, n_results=3, search_type="care", material_filter=None,
+                       category_filter=None):
         """Поиск релевантных документов в выбранной базе данных"""
         if db["type"] == "chroma":
             if search_type == "care":
+                # Добавляем фильтр по материалу, если указан
+                where_filter = {"материал": material_filter} if material_filter else None
+
                 results = db["support"].query(
                     query_texts=[query_text],
-                    n_results=n_results
+                    n_results=n_results,
+                    where=where_filter
                 )
                 return results["documents"][0] if results["documents"] else []
             else:
-                results = db["catalog"].query(
-                    query_texts=[query_text],
-                    n_results=n_results
-                )
+                # Для каталога собираем фильтры
+                where_filters = {}
+                if material_filter:
+                    where_filters["material"] = material_filter
+                if category_filter:
+                    where_filters["category"] = category_filter
+
+                # Если есть фильтры, применяем их
+                if where_filters:
+                    results = db["catalog"].query(
+                        query_texts=[query_text],
+                        n_results=n_results,
+                        where=where_filters
+                    )
+                else:
+                    results = db["catalog"].query(
+                        query_texts=[query_text],
+                        n_results=n_results
+                    )
                 return results["documents"][0] if results["documents"] else []
         else:
             # Поиск в FAISS
@@ -248,32 +313,130 @@ class JewelryConsultant:
                     np.array([query_embedding]).astype('float32'),
                     n_results
                 )
-                return [db["care_documents"][i] for i in indices[0] if i < len(db["care_documents"])]
+                # Фильтруем документы по материалу, если указан фильтр
+                filtered_docs = []
+                for i in indices[0]:
+                    if i < len(db["care_documents"]):
+                        doc = db["care_documents"][i]
+                        # Если указан фильтр по материалу, проверяем соответствие
+                        if material_filter:
+                            material_keywords = {
+                                "серебро": "серебр",
+                                "золото": "золот",
+                                "жемчуг": "жемчуг"
+                            }
+                            if material_filter in material_keywords and material_keywords[
+                                material_filter] in doc.lower():
+                                filtered_docs.append(doc)
+                        else:
+                            filtered_docs.append(doc)
+                return filtered_docs
             else:
                 distances, indices = db["catalog_index"].search(
                     np.array([query_embedding]).astype('float32'),
                     n_results
                 )
-                return [db["catalog_documents"][i] for i in indices[0] if i < len(db["catalog_documents"])]
+                # Фильтруем результаты по материалу и категории
+                filtered_docs = []
+                for i in indices[0]:
+                    if i < len(db["catalog_documents"]):
+                        doc = db["catalog_documents"][i]
+                        metadata = db["catalog_metadatas"][i]
+
+                        # Проверяем фильтры
+                        material_match = True
+                        category_match = True
+
+                        if material_filter:
+                            material_keywords = {
+                                "серебро": "серебр",
+                                "золото": "золот"
+                            }
+                            material_match = (material_filter in material_keywords and
+                                              material_keywords[material_filter] in doc.lower())
+
+                        if category_filter:
+                            category_keywords = {
+                                "кольцо": "кольцо",
+                                "серьги": "серьги"
+                            }
+                            category_match = (category_filter in category_keywords and
+                                              category_keywords[category_filter] in doc.lower())
+
+                        if material_match and category_match:
+                            filtered_docs.append(doc)
+
+                return filtered_docs
 
     def get_response(self, db, question):
         """Получение ответа от консультанта"""
-        # Поиск релевантной информации
-        care_context = self.query_database(db, question, 3, "care")
-        products_context = self.query_database(db, question, 2, "catalog")
+        # Определяем тип запроса
+        care_keywords = ["уход", "ухаживать", "чистить", "хранить", "очистка"]
+        product_keywords = ["посоветуй", "рекомендуй", "купить", "товар", "украшение", "стоимость", "цена",
+                            "сколько стоит"]
+
+        has_care_query = any(keyword in question.lower() for keyword in care_keywords)
+        has_product_query = any(keyword in question.lower() for keyword in product_keywords)
+
+        # Определяем материал, о котором идет речь
+        material_filter = None
+        if "серебр" in question.lower():
+            material_filter = "серебро"
+        elif "золот" in question.lower():
+            material_filter = "золото"
+        elif "жемчуг" in question.lower():
+            material_filter = "жемчуг"
+
+        # Определяем категорию, о которой идет речь
+        category_filter = None
+        if "кольц" in question.lower():
+            category_filter = "кольцо"
+        elif "серьг" in question.lower() or "серёж" in question.lower():
+            category_filter = "серьги"
+        elif "браслет" in question.lower():
+            category_filter = "браслет"
+        elif "ожерель" in question.lower() or "кулон" in question.lower():
+            category_filter = "ожерелье"
+
+        # Для вопросов про уход за конкретным материалом используем специальный фильтр
+        if has_care_query and material_filter:
+            # Поиск только информации о конкретном материале
+            care_context = self.query_database(db, question, 3, "care", material_filter)
+            products_context = []  # Не включаем информацию о товарах
+        elif has_product_query and (material_filter or category_filter):
+            # Для вопросов о товарах с указанием материала или категории применяем фильтры
+            care_context = []  # Не включаем информацию об уходе
+            products_context = self.query_database(
+                db, question, 3, "catalog", material_filter, category_filter
+            )
+        else:
+            # Обычный поиск
+            care_context = self.query_database(db, question, 3, "care") if has_care_query else []
+            products_context = self.query_database(db, question, 2, "catalog") if has_product_query else []
+
+        # Если запрос не определен, ищем в обоих типах данных
+        if not has_care_query and not has_product_query:
+            care_context = self.query_database(db, question, 2, "care")
+            products_context = self.query_database(db, question, 1, "catalog")
 
         # Форматирование контекста
-        care_text = "\n".join(care_context) if care_context else "Информация по уходу отсутствует."
-        products_text = "\n".join(products_context) if products_context else "Информация о товарах отсутствует."
+        care_text = "\n".join(care_context) if care_context else ""
+        products_text = "\n".join(products_context) if products_context else ""
 
-        # Генерация ответа
-        response = self.llm_chain.run({
+        # Генерация ответа с использованием invoke вместо run
+        response = self.llm_chain.invoke({
             "care_context": care_text,
             "products_context": products_text,
             "question": question
         })
 
-        return response
+        # Извлекаем текст ответа
+        response_text = response["text"] if isinstance(response, dict) else str(response)
+
+        # Очистка ответа от промпта и контекста
+        cleaned_response = self.clean_response(response_text, question)
+
+        return cleaned_response
 
     def interactive_mode(self):
         """Интерактивный режим работы с консультантом"""
