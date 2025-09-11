@@ -74,6 +74,16 @@ class JewelryConsultant:
                 "material": "серебро",
                 "category": "кольцо"
             }
+            ,
+            {
+                "name": "Серебряные серьги 'Лунный свет'",
+                "description": "Изящный дизайн.",
+                "usage": "Для повседневной носки.",
+                "price": "5,500 рублей.",
+                "url": "https://example.com/product/4",
+                "material": "серебро",
+                "category": "серьги"
+            }
         ]
 
         # Инициализация языковой модели
@@ -112,14 +122,14 @@ class JewelryConsultant:
     def setup_prompt(self):
         """Настройка промпт-шаблона"""
         prompt_template = """
-Ты — виртуальный консультант ювелирного магазина. Отвечай на вопросы клиентов одним предложением, используя только предоставленную информацию.
-Будь точным и конкретным. Если информации для ответа недостаточно, вежливо скажи об этом.
-
-{care_context}
-
-{products_context}
-
-"""
+            Ты — виртуальный консультант ювелирного магазина. Отвечай на вопросы клиентов одним предложением, используя только предоставленную информацию.
+            Будь точным и конкретным. Если информации для ответа недостаточно, вежливо скажи об этом.
+            
+            {care_context}
+            
+            {products_context}
+            
+            """
 
         return PromptTemplate(
             input_variables=["care_context", "products_context", "question"],
@@ -141,6 +151,9 @@ class JewelryConsultant:
             re.escape(question)
         ]
 
+        if not response or not response.strip():
+            return "Информации в базе данных недостаточно для ответа на заданный вопрос."
+
         for pattern in patterns_to_remove:
             response = re.sub(pattern, '', response, flags=re.IGNORECASE)
 
@@ -153,10 +166,18 @@ class JewelryConsultant:
         # Удаляем повторяющиеся фразы
         response = self.remove_repetitions(response)
 
+        # Если после очистки ответ пустой, возвращаем сообщение о недостатке информации
+        if not response or not response.strip():
+            return "Информации в базе данных недостаточно для ответа на заданный вопрос."
+
         return response
 
     def remove_repetitions(self, text):
         """Удаление повторяющихся фраз из текста"""
+        # Если текст пустой, возвращаем сообщение о недостатке информации
+        if not text or not text.strip():
+            return "Информации в базе данных недостаточно для ответа на заданный вопрос."
+
         # Разделяем текст на предложения
         sentences = re.split(r'[.!?]', text)
         sentences = [s.strip() for s in sentences if s.strip()]
@@ -174,7 +195,13 @@ class JewelryConsultant:
                 unique_sentences.append(sentence)
 
         # Собираем текст обратно
-        return '. '.join(unique_sentences) + '.' if unique_sentences else text
+        result = '. '.join(unique_sentences) + '.' if unique_sentences else text
+
+        # Если результат пустой, возвращаем сообщение о недостатке информации
+        if not result or not result.strip():
+            return "Информации в базе данных недостаточно для ответа на заданный вопрос."
+
+        return result
 
     def setup_vector_db(self, db_type="chroma"):
         """Настройка векторной базы данных (ChromaDB или FAISS)"""
@@ -435,6 +462,10 @@ class JewelryConsultant:
 
         # Очистка ответа от промпта и контекста
         cleaned_response = self.clean_response(response_text, question)
+
+        # Проверка на пустой ответ
+        if not cleaned_response or not cleaned_response.strip():
+            return "Информации в базе данных недостаточно для ответа на заданный вопрос."
 
         return cleaned_response
 
