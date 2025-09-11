@@ -311,19 +311,27 @@ class JewelryConsultant:
                 )
                 return results["documents"][0] if results["documents"] else []
             else:
-                # Для каталога собираем фильтры
-                where_filters = {}
+                # Для каталога собираем фильтры с использованием оператора $and
+                where_filters = []
                 if material_filter:
-                    where_filters["material"] = material_filter
+                    where_filters.append({"material": material_filter})
                 if category_filter:
-                    where_filters["category"] = category_filter
+                    where_filters.append({"category": category_filter})
+
+                # Если есть несколько фильтров, объединяем их с помощью $and
+                if len(where_filters) > 1:
+                    where_filter = {"$and": where_filters}
+                elif len(where_filters) == 1:
+                    where_filter = where_filters[0]
+                else:
+                    where_filter = None
 
                 # Если есть фильтры, применяем их
-                if where_filters:
+                if where_filter:
                     results = db["catalog"].query(
                         query_texts=[query_text],
                         n_results=n_results,
-                        where=where_filters
+                        where=where_filter
                     )
                 else:
                     results = db["catalog"].query(
@@ -350,7 +358,8 @@ class JewelryConsultant:
                             material_keywords = {
                                 "серебро": "серебр",
                                 "золото": "золот",
-                                "жемчуг": "жемчуг"
+                                "жемчуг": "жемчуг",
+                                "бриллиант": "брил"
                             }
                             if material_filter in material_keywords and material_keywords[
                                 material_filter] in doc.lower():
@@ -413,6 +422,8 @@ class JewelryConsultant:
             material_filter = "золото"
         elif "жемчуг" in question.lower():
             material_filter = "жемчуг"
+        elif "брил" in question.lower():
+            material_filter = "бриллиант"
 
         # Определяем категорию, о которой идет речь
         category_filter = None
