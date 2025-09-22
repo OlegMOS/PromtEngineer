@@ -3,26 +3,4 @@
 {% block content %}
 <h1 class="text-center">Dashboard</h1>
 <p class="text-center">Welcome to your dashboard!</p>
-
-<!-- Добавляем блок с статусом Hugging Face -->
-<div class="card mb-4">
-    <div class="card-header">
-        <h5>Hugging Face Status</h5>
-    </div>
-    <div class="card-body">
-        {% if hf_status == "active" %}
-            <div class="alert alert-success">Hugging Face API: Active</div>
-        {% elif hf_status == "payment_required" %}
-            <div class="alert alert-warning">
-                <strong>Hugging Face API:</strong> Payment required
-                <p>Please add a payment method to your Hugging Face account to enable image generation.</p>
-            </div>
-        {% else %}
-            <div class="alert alert-danger">
-                <strong>Hugging Face API:</strong> Error ({{ hf_status }})
-                <p>Image generation may not work properly.</p>
-            </div>
-        {% endif %}
-    </div>
-</div>
 {% endblock %}
