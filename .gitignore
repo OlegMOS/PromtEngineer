@@ -47,5 +47,4 @@ clean_project.py
 
 app/static/generated/
 
-SMMass\config.py
 SMMass/config.py
