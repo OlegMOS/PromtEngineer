@@ -6,3 +6,4 @@ vk_api_key = "vk1.a.xNL15WGmKIn_E__vbweYNrMA7ZaILLppo6srKA8sYhv6acDVM5L9Os4lzrhu
 vk_group_id = 226084011
 
 huggingface_key="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"
+
