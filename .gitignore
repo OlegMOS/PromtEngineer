@@ -46,3 +46,5 @@ clean_project.py
 .vscode/
 
 app/static/generated/
+
+SMMass\config.py
