@@ -45,3 +45,4 @@ clean_project.py
 .idea
 .vscode/
 
+app/static/generated/

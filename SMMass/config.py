@@ -1,0 +1,8 @@
+#Open AI
+openai_key = "sk-eojihWMYuwlwO4oNjNMX8DbkkkBtLg7I"
+
+# VK
+vk_api_key = "vk1.a.xNL15WGmKIn_E__vbweYNrMA7ZaILLppo6srKA8sYhv6acDVM5L9Os4lzrhubw4dPSg_fulynZYHbeHyWD8Jfwoyq_ykg00MKGkcjDLwV4SlHdUQfE02Cc1xM9VxTTRVBkTPlK4CmoW9OfoVWpHI6iH9gkMr19rw1ovFRXASH2yRCzZTmpM7sRQZnLQJMN4ASNyUWzvL5GC3FiPl7AnrkQ"
+vk_group_id = 226084011
+
+huggingface_key="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"
