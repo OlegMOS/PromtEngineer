@@ -1,5 +1,10 @@
 import requests
 import logging
+from telethon import TelegramClient
+from telethon.tl.functions.channels import GetFullChannelRequest
+from telethon.tl.types import InputChannel
+import asyncio
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -10,12 +15,72 @@ class TelegramStats:
         self.channel_id = channel_id
         self.base_url = f"https://api.telegram.org/bot{self.bot_token}"
 
-    def get_channel_stats(self):
-        """Получение статистики канала"""
+        # Данные для Telethon (Client API)
+        self.api_id = os.getenv('TELEGRAM_API_ID', 'YOUR_API_ID')
+        self.api_hash = os.getenv('TELEGRAM_API_HASH', 'YOUR_API_HASH')
+        self.phone = os.getenv('TELEGRAM_PHONE', 'YOUR_PHONE')
+
+    async def get_channel_stats_async(self):
+        """Получение статистики канала через Telethon"""
         stats = {}
 
         try:
-            # Получаем базовую информацию о канале
+            # Создаем клиент Telethon
+            client = TelegramClient('session_name', self.api_id, self.api_hash)
+            await client.start(phone=self.phone)
+
+            # Получаем информацию о канале
+            if self.channel_id.startswith('@'):
+                channel = await client.get_entity(self.channel_id)
+            else:
+                channel = await client.get_entity(int(self.channel_id))
+
+            # Получаем полную информацию о канале
+            full_channel = await client(GetFullChannelRequest(channel=channel))
+
+            # Основная статистика
+            stats['Название канала'] = channel.title
+            stats['Username'] = f"@{channel.username}" if channel.username else "Отсутствует"
+            stats['ID канала'] = channel.id
+            stats['Количество подписчиков'] = getattr(channel, 'participants_count', 'Недоступно')
+
+            # Дополнительная информация из full_channel
+            if full_channel:
+                stats['Описание'] = full_channel.full_chat.about or "Отсутствует"
+                stats['Количество сообщений'] = getattr(full_channel.full_chat, 'messages_count', 'Недоступно')
+
+                # Статистика просмотров (если доступна)
+                if hasattr(full_channel.full_chat, 'views'):
+                    stats['Просмотры'] = full_channel.full_chat.views
+
+            await client.disconnect()
+
+        except Exception as e:
+            stats['Ошибка Telethon'] = str('Возвращаем базовую статистику через Bot API')
+            # Возвращаем базовую статистику через Bot API
+            stats.update(self.get_basic_stats())
+
+        return stats
+
+    def get_channel_stats(self):
+        """Синхронный метод для получения статистики"""
+        try:
+            # Запускаем асинхронную функцию
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            stats = loop.run_until_complete(self.get_channel_stats_async())
+            loop.close()
+            return stats
+        except Exception as e:
+            logger.error(f"Error getting Telegram stats: {e}")
+            return self.get_basic_stats()
+
+    def get_basic_stats(self):
+        """Базовая статистика через Bot API"""
+        stats = {}
+
+        try:
+            # Информация о канале
             method = "getChat"
             params = {'chat_id': self.channel_id}
 
@@ -24,41 +89,47 @@ class TelegramStats:
 
             if result.get('ok'):
                 chat_info = result['result']
-
-                # Основная информация о канале
                 stats['Название канала'] = chat_info.get('title', 'Неизвестно')
                 stats['Тип'] = chat_info.get('type', 'Неизвестно')
                 stats['ID канала'] = chat_info.get('id', 'Неизвестно')
-
-                # Количество подписчиков (доступно только для администраторов)
-                if 'members_count' in chat_info:
-                    stats['Количество подписчиков'] = chat_info['members_count']
-                else:
-                    stats['Количество подписчиков'] = 'Недоступно (бот не является администратором)'
-
-                # Описание канала
+                stats['Username'] = f"@{chat_info.get('username')}" if chat_info.get('username') else "Отсутствует"
                 stats['Описание'] = chat_info.get('description', 'Отсутствует')
-                stats['Username'] = chat_info.get('username', 'Отсутствует')
 
-                # Проверяем права бота
-                admin_status = self.check_bot_admin_status()
-                stats['Статус бота'] = admin_status
+                # Проверяем статус бота
+                stats['Статус бота'] = self.check_bot_admin_status()
 
-                # Если бот администратор, пытаемся получить больше статистики
-                if "администратор" in admin_status:
-                    # Попытка получить информацию о последних сообщениях
-                    recent_stats = self.get_recent_posts_stats()
-                    stats.update(recent_stats)
+                # Альтернативные методы получения статистики
+                member_count = self.try_get_members_count()
+                if member_count:
+                    stats['Количество подписчиков'] = member_count
+                else:
+                    stats['Количество подписчиков'] = 'Используйте Telethon API для получения'
+
             else:
-                error_msg = result.get('description', 'Unknown error')
-                stats['Ошибка'] = f"Не удалось получить информацию о канале: {error_msg}"
-                stats['Инструкция'] = self.get_setup_instructions()
+                stats['Ошибка Bot API'] = result.get('description', 'Unknown error')
 
         except Exception as e:
             stats['Ошибка'] = str(e)
-            stats['Инструкция'] = self.get_setup_instructions()
 
         return stats
+
+    def try_get_members_count(self):
+        """Попытка получить количество участников через различные методы"""
+        try:
+            # Метод 1: getChatMembersCount (устаревший, но может работать)
+            method = "getChatMembersCount"
+            params = {'chat_id': self.channel_id}
+
+            response = requests.post(f"{self.base_url}/{method}", params=params, timeout=10)
+            result = response.json()
+
+            if result.get('ok'):
+                return result['result']
+
+        except:
+            pass
+
+        return None
 
     def check_bot_admin_status(self):
         """Проверяет, является ли бот администратором канала"""
@@ -83,10 +154,10 @@ class TelegramStats:
                 }
                 return status_map.get(status, status)
 
-            return 'Не удалось проверить статус'
-
         except Exception as e:
-            return f'Ошибка проверки: {str(e)}'
+            logger.error(f"Error checking admin status: {e}")
+
+        return 'Не удалось проверить статус'
 
     def get_bot_user_id(self):
         """Получает user_id бота"""
@@ -95,45 +166,20 @@ class TelegramStats:
             result = response.json()
             if result.get('ok'):
                 return result['result']['id']
-            return None
         except:
-            return None
-
-    def get_recent_posts_stats(self):
-        """Пытается получить статистику по последним сообщениям (ограниченно)"""
-        stats = {}
-        try:
-            # Для каналов нет прямого API для получения статистики сообщений
-            # Можно только проверить, может ли бот отправлять сообщения
-            method = "sendChatAction"
-            params = {
-                'chat_id': self.channel_id,
-                'action': 'typing'
-            }
-
-            response = requests.post(f"{self.base_url}/{method}", params=params, timeout=5)
-            if response.json().get('ok'):
-                stats['Возможность публикации'] = '✅ Доступна'
-            else:
-                stats['Возможность публикации'] = '❌ Не доступна'
-
-        except:
-            stats['Возможность публикации'] = 'Неизвестно'
-
-        return stats
+            pass
+        return None
 
     def get_setup_instructions(self):
-        """Возвращает инструкцию по настройке"""
+        """Инструкция по настройке Telethon"""
         return """
-        Для получения полной статистики канала:
-        1. Добавьте бота как администратора в ваш канал
-        2. Дайте боту права на просмотр участников
-        3. Убедитесь, что канал публичный или бот имеет доступ
+        Для получения полной статистики подписчиков необходимо настроить Telethon:
 
-        Как добавить бота в администраторы:
-        1. Откройте настройки канала
-        2. Выберите "Администраторы"
-        3. Нажмите "Добавить администратора"
-        4. Найдите вашего бота по username
-        5. Выдайте необходимые права
+        1. Получите API ID и API Hash на https://my.telegram.org
+        2. Установите переменные окружения:
+           - TELEGRAM_API_ID=ваш_api_id
+           - TELEGRAM_API_HASH=ваш_api_hash  
+           - TELEGRAM_PHONE=ваш_номер_телефона
+
+        Или используйте бота-аналитику сторонних сервисов для получения статистики.
         """
