@@ -6,6 +6,8 @@ class User(db.Model):
     password = db.Column(db.String(80), nullable=False)
     vk_api_id = db.Column(db.String(250), nullable=True)
     vk_group_id = db.Column(db.String(20), nullable=True)
+    telegram_bot_token = db.Column(db.String(200))  # Новое поле
+    telegram_channel_id = db.Column(db.String(100))  # Новое поле
 
     def __repr__(self):
         return f"User('{self.username}')"

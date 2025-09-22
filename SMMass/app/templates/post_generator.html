@@ -15,28 +15,58 @@
         <input type="checkbox" name="generate_image" id="generate_image" class="form-check-input">
         <label for="generate_image" class="form-check-label">Generate Image</label>
     </div>
+
+    <!-- Заменяем старый чекбокс на два отдельных для VK и Telegram -->
     <div class="form-check">
-        <input type="checkbox" name="auto_post" id="auto_post" class="form-check-input">
-        <label for="auto_post" class="form-check-label">Auto Post to VK</label>
+        <input type="checkbox" name="auto_post_vk" id="auto_post_vk" class="form-check-input">
+        <label for="auto_post_vk" class="form-check-label">Auto Post to VK</label>
     </div>
+    <div class="form-check">
+        <input type="checkbox" name="auto_post_telegram" id="auto_post_telegram" class="form-check-input">
+        <label for="auto_post_telegram" class="form-check-label">Auto Post to Telegram</label>
+    </div>
+
     <div class="form-group">
-    <label for="custom_prompt">Кастомный промпт для изображения (опционально, на английском):</label>
-    <textarea class="form-control" id="custom_prompt" name="custom_prompt" rows="3"
-              placeholder="Например: professional product photography of a elegant black skirt on a white background, high quality, detailed"></textarea>
-    <small class="form-text text-muted">
-        Оставьте пустым для автоматической генерации промпта. Для лучших результатов используйте английский язык.
-    </small>
+        <label for="custom_prompt">Кастомный промпт для изображения (опционально, на английском):</label>
+        <textarea class="form-control" id="custom_prompt" name="custom_prompt" rows="3"
+                  placeholder="Например: professional product photography of a elegant black skirt on a white background, high quality, detailed"></textarea>
+        <small class="form-text text-muted">
+            Оставьте пустым для автоматической генерации промпта. Для лучших результатов используйте английский язык.
+        </small>
     </div>
     <button type="submit" class="btn btn-primary btn-block">Generate</button>
 </form>
 
 {% if post_content %}
 <h2 class="text-center mt-4">Generated Post</h2>
-<p>{{ post_content }}</p>
+<div class="card">
+    <div class="card-body">
+        <p>{{ post_content }}</p>
+    </div>
+</div>
 {% endif %}
 
 {% if image_url %}
 <h2 class="text-center mt-4">Generated Image</h2>
-<img src="{{ image_url }}" alt="Generated Image" width="300px" class="img-fluid mx-auto d-block">
+<div class="text-center">
+    <img src="{{ image_url }}" alt="Generated Image" class="img-fluid" style="max-width: 500px;">
+</div>
 {% endif %}
+
+<!-- Добавляем секцию для отображения статуса публикации -->
+{% with messages = get_flashed_messages(with_categories=true) %}
+    {% if messages %}
+        <div class="mt-4">
+            {% for category, message in messages %}
+                <div class="alert alert-{{ 'danger' if category == 'error' else 'success' }} alert-dismissible fade show" role="alert">
+                    {{ message }}
+                    <button type="button" class="close" data-dismiss="alert" aria-label="Close">
+                        <span aria-hidden="true">&times;</span>
+                    </button>
+                </div>
+            {% endfor %}
+        </div>
+    {% endif %}
+{% endwith %}
+
 {% endblock %}

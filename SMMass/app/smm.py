@@ -4,13 +4,15 @@ from app import db
 from generators.text_gen import PostGenerator
 from generators.image_gen import ImageGenerator
 from social_publishers.vk_publisher import VKPublisher
+from social_publishers.telegram_publisher import TelegramPublisher  # Новый импорт
 from social_stats.vk_stats import VKStats
+from social_stats.telegram_stats import TelegramStats  # Новый импорт
 from config import openai_key, huggingface_key
 from openai import OpenAI
 import os
 import certifi
 import logging
-import requests  # Добавляем импорт requests
+import requests
 
 # Инициализируем логгер
 logger = logging.getLogger(__name__)
@@ -48,6 +50,8 @@ def settings():
     if request.method == 'POST':
         user.vk_api_id = request.form['vk_api_id']
         user.vk_group_id = request.form['vk_group_id']
+        user.telegram_bot_token = request.form.get('telegram_bot_token', '')
+        user.telegram_channel_id = request.form.get('telegram_channel_id', '')
         db.session.commit()
         flash('Settings saved!', 'success')
 
@@ -63,7 +67,8 @@ def post_generator():
         tone = request.form['tone']
         topic = request.form['topic']
         generate_image = 'generate_image' in request.form
-        auto_post = 'auto_post' in request.form
+        auto_post_vk = 'auto_post_vk' in request.form
+        auto_post_telegram = 'auto_post_telegram' in request.form  # Новый флаг
         custom_prompt = request.form.get('custom_prompt', '')
 
         user = User.query.get(session['user_id'])
@@ -75,10 +80,8 @@ def post_generator():
 
             image_url = None
 
-            # В функции post_generator
             if generate_image:
                 try:
-                    # Если пользователь указал кастомный промпт, используем его
                     if custom_prompt:
                         image_prompt = custom_prompt
                     else:
@@ -86,7 +89,6 @@ def post_generator():
 
                     logger.info(f"Image generation prompt: {image_prompt}")
 
-                    # Проверяем, что ключ Hugging Face настроен
                     if not huggingface_key or huggingface_key.strip() == "":
                         flash('Error: Hugging Face API key is not configured. Please contact administrator.', 'error')
                         image_url = None
@@ -98,7 +100,6 @@ def post_generator():
                     error_msg = str(e)
                     logger.error(f"Image generation error: {error_msg}")
 
-                    # Более информативные сообщения об ошибках
                     if "payment method" in error_msg.lower():
                         flash(
                             'Error: Hugging Face requires a payment method for image generation. Please add a payment method to your Hugging Face account settings.',
@@ -115,12 +116,27 @@ def post_generator():
                         flash(f'Error generating image: {error_msg}', 'error')
                     image_url = None
 
-            if auto_post and user.vk_api_id and user.vk_group_id:
-                vk_publisher = VKPublisher(user.vk_api_id, user.vk_group_id)
-                vk_publisher.publish_post(post_content, image_url)
-                flash('Post published to VK successfully!', 'success')
-            elif auto_post:
-                flash('Для автоматической публикации необходимо настроить VK API в настройках', 'error')
+            # Публикация в VK
+            if auto_post_vk and user.vk_api_id and user.vk_group_id:
+                try:
+                    vk_publisher = VKPublisher(user.vk_api_id, user.vk_group_id)
+                    vk_publisher.publish_post(post_content, image_url)
+                    flash('Post published to VK successfully!', 'success')
+                except Exception as e:
+                    flash(f'Error publishing to VK: {str(e)}', 'error')
+            elif auto_post_vk:
+                flash('Для автоматической публикации в VK необходимо настроить VK API в настройках', 'error')
+
+            # Публикация в Telegram
+            if auto_post_telegram and user.telegram_bot_token and user.telegram_channel_id:
+                try:
+                    telegram_publisher = TelegramPublisher(user.telegram_bot_token, user.telegram_channel_id)
+                    telegram_publisher.publish_post(post_content, image_url)
+                    flash('Post published to Telegram successfully!', 'success')
+                except Exception as e:
+                    flash(f'Error publishing to Telegram: {str(e)}', 'error')
+            elif auto_post_telegram:
+                flash('Для автоматической публикации в Telegram необходимо настроить Telegram бота и канал в настройках', 'error')
 
             return render_template('post_generator.html', post_content=post_content, image_url=image_url)
 
@@ -138,20 +154,48 @@ def vk_stats():
 
     user = User.query.get(session['user_id'])
 
-    vk_stats = VKStats(user.vk_api_id, user.vk_group_id)
-    followers_count = vk_stats.get_followers()
+    if not user.vk_api_id or not user.vk_group_id:
+        flash('Настройте VK API в настройках для просмотра статистики', 'error')
+        return redirect(url_for('smm.settings'))
 
-    stats = {
-        "Followers": followers_count,
-        "Likes": "N/A",
-        "Comments": "N/A",
-        "Shares": "N/A"
-    }
+    try:
+        vk_stats = VKStats(user.vk_api_id, user.vk_group_id)
+        followers_count = vk_stats.get_followers()
 
-    return render_template('vk_stats.html', stats=stats)
+        stats = {
+            "Подписчики": followers_count,
+            "Лайки": "N/A",
+            "Комментарии": "N/A",
+            "Репосты": "N/A"
+        }
+
+        return render_template('vk_stats.html', stats=stats)
+    except Exception as e:
+        flash(f'Ошибка получения статистики VK: {str(e)}', 'error')
+        return render_template('vk_stats.html', stats={})
 
 
-# Добавляем новый эндпоинт для проверки доступности моделей
+@smm_bp.route('/telegram-stats', methods=['GET'])
+def telegram_stats():
+    if 'user_id' not in session:
+        return redirect(url_for('auth.login'))
+
+    user = User.query.get(session['user_id'])
+
+    if not user.telegram_bot_token or not user.telegram_channel_id:
+        flash('Настройте Telegram бота и канал в настройках для просмотра статистики', 'error')
+        return redirect(url_for('smm.settings'))
+
+    try:
+        telegram_stats = TelegramStats(user.telegram_bot_token, user.telegram_channel_id)
+        stats = telegram_stats.get_channel_stats()
+
+        return render_template('telegram_stats.html', stats=stats)
+    except Exception as e:
+        flash(f'Ошибка получения статистики Telegram: {str(e)}', 'error')
+        return render_template('telegram_stats.html', stats={})
+
+
 @smm_bp.route('/check-models', methods=['GET'])
 def check_models():
     """Эндпоинт для проверки доступности моделей Hugging Face"""
@@ -180,4 +224,3 @@ def check_models():
             }
 
     return jsonify(results)
-

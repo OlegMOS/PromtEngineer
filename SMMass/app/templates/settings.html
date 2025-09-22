@@ -12,5 +12,18 @@
         <input type="text" name="vk_group_id" id="vk_group_id" class="form-control" value="{{ user.vk_group_id }}">
     </div>
     <button type="submit" class="btn btn-primary btn-block">Save</button>
+        <!-- Добавьте эти поля в форму настроек -->
+    <div class="form-group">
+        <label for="telegram_bot_token">Telegram Bot Token</label>
+        <input type="text" class="form-control" id="telegram_bot_token"
+               name="telegram_bot_token" value="{{ user.telegram_bot_token or '' }}">
+        <small class="form-text text-muted">Получите у @BotFather</small>
+    </div>
+    <div class="form-group">
+        <label for="telegram_channel_id">Telegram Channel ID</label>
+        <input type="text" class="form-control" id="telegram_channel_id"
+               name="telegram_channel_id" value="{{ user.telegram_channel_id or '' }}">
+        <small class="form-text text-muted">Формат: @channelname или ID канала</small>
+    </div>
 </form>
 {% endblock %}
