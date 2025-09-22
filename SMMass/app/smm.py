@@ -128,16 +128,37 @@ def post_generator():
                 flash('Для автоматической публикации в VK необходимо настроить VK API в настройках', 'error')
 
             # Публикация в Telegram
+            # Публикация в Telegram
             if auto_post_telegram and user.telegram_bot_token and user.telegram_channel_id:
                 try:
                     telegram_publisher = TelegramPublisher(user.telegram_bot_token, user.telegram_channel_id)
-                    telegram_publisher.publish_post(post_content, image_url)
+
+                    # Получаем последнее сгенерированное изображение из папки
+                    image_path = None
+                    if generate_image:
+                        image_dir = r"C:\Users\o.muravickiy\PycharmProjects\PromtEngineer\SMMass\app\static\generated"
+                        if os.path.exists(image_dir):
+                            # Ищем все PNG файлы и берем самый новый
+                            png_files = [f for f in os.listdir(image_dir) if f.endswith('.png')]
+                            if png_files:
+                                # Сортируем по времени создания (последний первый)
+                                png_files.sort(key=lambda x: os.path.getctime(os.path.join(image_dir, x)), reverse=True)
+                                latest_image = png_files[0]
+                                image_path = os.path.join(image_dir, latest_image)
+                                flash(f'Using latest generated image: {latest_image}', 'success')
+                            else:
+                                flash('No PNG images found in generated folder', 'error')
+                        else:
+                            flash('Generated images folder not found', 'error')
+
+                    telegram_publisher.publish_post(post_content, image_path)
                     flash('Post published to Telegram successfully!', 'success')
                 except Exception as e:
                     flash(f'Error publishing to Telegram: {str(e)}', 'error')
             elif auto_post_telegram:
-                flash('Для автоматической публикации в Telegram необходимо настроить Telegram бота и канал в настройках', 'error')
-
+                flash(
+                    'Для автоматической публикации в Telegram необходимо настроить Telegram бота и канал в настройках',
+                    'error')
             return render_template('post_generator.html', post_content=post_content, image_url=image_url)
 
         except Exception as e:
