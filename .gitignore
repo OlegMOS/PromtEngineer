@@ -1,4 +1,5 @@
 # Игнорирование файлов окружения
+FAISS_Search/.env
 LangChainRAG/.env
 *.env
 *.env.local
