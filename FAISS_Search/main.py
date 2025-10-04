@@ -9,6 +9,9 @@ import nest_asyncio
 import asyncio
 import os
 from dotenv import load_dotenv
+import pickle
+import hashlib
+import time
 
 # Загрузка переменных окружения из .env файла
 load_dotenv()
@@ -23,6 +26,88 @@ class ResumeSearchEngine:
         self.model = SentenceTransformer('sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2')
         self.index = None
         self.resume_texts = []
+        self.cache_dir = "vector_cache"
+        self.excel_file_path = excel_file_path
+
+        # Создаем директорию для кэша, если её нет
+        if not os.path.exists(self.cache_dir):
+            os.makedirs(self.cache_dir)
+
+    def _get_cache_key(self):
+        """Генерирует ключ кэша на основе содержимого файла и модели"""
+        # Хэш содержимого файла
+        file_hash = hashlib.md5()
+        with open(self.excel_file_path, 'rb') as f:
+            for chunk in iter(lambda: f.read(4096), b""):
+                file_hash.update(chunk)
+
+        # Хэш имени модели
+        model_hash = hashlib.md5(self.model.get_sentence_embedding_dimension().__str__().encode()).hexdigest()[:8]
+
+        cache_key = f"{file_hash.hexdigest()}_{model_hash}"
+        return cache_key
+
+    def _cache_exists(self):
+        """Проверяет существование кэша"""
+        cache_key = self._get_cache_key()
+        index_path = os.path.join(self.cache_dir, f"{cache_key}.faiss")
+        texts_path = os.path.join(self.cache_dir, f"{cache_key}_texts.pkl")
+        metadata_path = os.path.join(self.cache_dir, f"{cache_key}_metadata.pkl")
+
+        return all(os.path.exists(path) for path in [index_path, texts_path, metadata_path])
+
+    def _save_to_cache(self, embeddings):
+        """Сохраняет векторные представления и индекс в кэш"""
+        cache_key = self._get_cache_key()
+
+        # Сохраняем FAISS индекс
+        index_path = os.path.join(self.cache_dir, f"{cache_key}.faiss")
+        faiss.write_index(self.index, index_path)
+
+        # Сохраняем тексты резюме
+        texts_path = os.path.join(self.cache_dir, f"{cache_key}_texts.pkl")
+        with open(texts_path, 'wb') as f:
+            pickle.dump(self.resume_texts, f)
+
+        # Сохраняем метаданные
+        metadata_path = os.path.join(self.cache_dir, f"{cache_key}_metadata.pkl")
+        metadata = {
+            'timestamp': time.time(),
+            'data_shape': embeddings.shape,
+            'model_name': 'sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2',
+            'num_resumes': len(self.resume_texts)
+        }
+        with open(metadata_path, 'wb') as f:
+            pickle.dump(metadata, f)
+
+        print(f"Векторные представления сохранены в кэш: {cache_key}")
+
+    def _load_from_cache(self):
+        """Загружает векторные представления и индекс из кэша"""
+        cache_key = self._get_cache_key()
+
+        try:
+            # Загружаем FAISS индекс
+            index_path = os.path.join(self.cache_dir, f"{cache_key}.faiss")
+            self.index = faiss.read_index(index_path)
+
+            # Загружаем тексты резюме
+            texts_path = os.path.join(self.cache_dir, f"{cache_key}_texts.pkl")
+            with open(texts_path, 'rb') as f:
+                self.resume_texts = pickle.load(f)
+
+            # Загружаем метаданные для проверки
+            metadata_path = os.path.join(self.cache_dir, f"{cache_key}_metadata.pkl")
+            with open(metadata_path, 'rb') as f:
+                metadata = pickle.load(f)
+
+            print(f"Векторные представления загружены из кэша: {cache_key}")
+            print(f"Загружено {len(self.resume_texts)} резюме, размерность: {self.index.d}")
+            return True
+
+        except Exception as e:
+            print(f"Ошибка загрузки из кэша: {e}")
+            return False
 
     def preprocess_data(self):
         """Предобработка и нормализация данных"""
@@ -68,8 +153,14 @@ class ResumeSearchEngine:
         print(f"Обработано {len(self.resume_texts)} резюме")
 
     def create_faiss_index(self):
-        """Создание векторной базы данных FAISS"""
-        print("Создание векторных представлений...")
+        """Создание или загрузка векторной базы данных FAISS"""
+
+        # Пытаемся загрузить из кэша
+        if self._cache_exists():
+            if self._load_from_cache():
+                return
+
+        print("Создание новых векторных представлений...")
 
         # Создание эмбеддингов
         embeddings = self.model.encode(self.resume_texts, show_progress_bar=True)
@@ -82,7 +173,23 @@ class ResumeSearchEngine:
         self.index = faiss.IndexFlatIP(dimension)  # IndexFlatIP для косинусного сходства
         self.index.add(embeddings.astype('float32'))
 
+        # Сохраняем в кэш
+        self._save_to_cache(embeddings)
+
         print(f"Индекс FAISS создан с {self.index.ntotal} векторами")
+
+    def clear_old_cache(self, max_age_days=30):
+        """Очистка устаревших кэш-файлов"""
+        current_time = time.time()
+        max_age_seconds = max_age_days * 24 * 60 * 60
+
+        for filename in os.listdir(self.cache_dir):
+            filepath = os.path.join(self.cache_dir, filename)
+            if os.path.isfile(filepath):
+                file_age = current_time - os.path.getmtime(filepath)
+                if file_age > max_age_seconds:
+                    os.remove(filepath)
+                    print(f"Удален устаревший кэш: {filename}")
 
     def keyword_search(self, query, k=10):
         """Поиск по ключевым словам"""
@@ -138,62 +245,126 @@ class ResumeSearchEngine:
         return location_results[:k]
 
     def hybrid_search(self, keyword_query, location_query, k=5, keyword_weight=0.3, location_weight=0.7):
-        """Гибридный поиск с объединением результатов"""
+        """Гибридный поиск: сначала по локации, затем по профессии"""
         print(f"Поиск: '{keyword_query}' в локации '{location_query}'")
 
-        # Выполнение обоих поисков
-        keyword_results = self.keyword_search(keyword_query, k=20)
-        location_results = self.location_search(location_query, k=20)
+        # Сначала ищем по локации
+        location_results = self.location_search(location_query, k=50)  # Берем больше результатов для фильтрации
 
-        # Нормализация score
-        if keyword_results:
-            max_keyword_score = max(r['score'] for r in keyword_results)
-            for r in keyword_results:
-                r['normalized_score'] = r['score'] / max_keyword_score if max_keyword_score > 0 else 0
-        else:
-            max_keyword_score = 1.0
+        if not location_results:
+            # Если нет результатов по локации, ищем только по ключевым словам
+            print("Не найдено резюме в указанной локации, использую поиск только по профессии")
+            keyword_results = self.keyword_search(keyword_query, k=k)
 
-        if location_results:
-            max_location_score = max(r['score'] for r in location_results)
-            for r in location_results:
-                r['normalized_score'] = r['score'] / max_location_score if max_location_score > 0 else 0
-        else:
-            max_location_score = 1.0
+            # Преобразуем в тот же формат
+            final_results = []
+            for result in keyword_results:
+                final_results.append({
+                    'index': result['index'],
+                    'keyword_score': result['score'],
+                    'location_score': 0,
+                    'final_score': result['score'] * keyword_weight
+                })
 
-        # Объединение результатов
+            return final_results[:k]
+
+        # Фильтруем результаты по локации (оставляем только с достаточно высоким score локации)
+        min_location_score = 0.3  # Минимальный порог совпадения по локации
+        filtered_location_results = [r for r in location_results if r['score'] >= min_location_score]
+
+        if not filtered_location_results:
+            # Если после фильтрации не осталось результатов, ослабляем критерий
+            filtered_location_results = location_results[:10]  # Берем топ-10 по локации
+
+        # Среди отфильтрованных по локации резюме ищем по ключевым словам
+        location_indices = [r['index'] for r in filtered_location_results]
+
+        # Выполняем поиск по ключевым словам только среди этих индексов
+        keyword_results = self._keyword_search_among_indices(keyword_query, location_indices, k=len(location_indices))
+
+        # Объединяем результаты
         combined_results = {}
 
-        # Добавление результатов keyword поиска
-        for result in keyword_results:
-            idx = result['index']
-            combined_results[idx] = {
-                'index': idx,
-                'keyword_score': result['normalized_score'],
-                'location_score': 0,
-                'final_score': result['normalized_score'] * keyword_weight
-            }
+        # Создаем словарь для быстрого доступа к результатам локации
+        location_dict = {r['index']: r for r in filtered_location_results}
 
-        # Добавление/обновление результатов location поиска
-        for result in location_results:
-            idx = result['index']
-            if idx in combined_results:
-                combined_results[idx]['location_score'] = result['normalized_score']
-                combined_results[idx]['final_score'] = (
-                        combined_results[idx]['keyword_score'] * keyword_weight +
-                        result['normalized_score'] * location_weight
-                )
-            else:
+        # Объединяем score
+        for keyword_result in keyword_results:
+            idx = keyword_result['index']
+            if idx in location_dict:
+                location_score = location_dict[idx]['score']
+                keyword_score = keyword_result['score']
+
+                # Нормализуем scores
+                normalized_keyword = keyword_score
+                normalized_location = location_score
+
                 combined_results[idx] = {
                     'index': idx,
-                    'keyword_score': 0,
-                    'location_score': result['normalized_score'],
-                    'final_score': result['normalized_score'] * location_weight
+                    'keyword_score': normalized_keyword,
+                    'location_score': normalized_location,
+                    'final_score': (normalized_keyword * keyword_weight + normalized_location * location_weight)
                 }
 
+        # Если после объединения мало результатов, добавляем резюме только по локации
+        if len(combined_results) < k:
+            for location_result in filtered_location_results:
+                idx = location_result['index']
+                if idx not in combined_results:
+                    combined_results[idx] = {
+                        'index': idx,
+                        'keyword_score': 0,
+                        'location_score': location_result['score'],
+                        'final_score': location_result['score'] * location_weight
+                    }
+
         # Сортировка по итоговому score
-        final_results = sorted(combined_results.values(), key=lambda x: x['final_score'], reverse=True)
+        final_results = sorted(combined_results.values(),
+                               key=lambda x: (x['final_score'], x['location_score'], x['keyword_score']),
+                               reverse=True)
 
         return final_results[:k]
+
+    def _keyword_search_among_indices(self, query, indices, k=10):
+        """Поиск по ключевым словам только среди указанных индексов"""
+        if not indices:
+            return []
+
+        query_embedding = self.model.encode([query])
+        faiss.normalize_L2(query_embedding)
+
+        # Получаем все эмбеддинги для указанных индексов
+        all_embeddings = []
+        valid_indices = []
+
+        # Создаем временный индекс только для выбранных резюме
+        dimension = self.index.d
+        temp_index = faiss.IndexFlatIP(dimension)
+
+        for idx in indices:
+            if idx < self.index.ntotal:
+                # Получаем эмбеддинг для этого индекса
+                embedding = self.index.reconstruct(idx).reshape(1, -1)
+                temp_index.add(embedding.astype('float32'))
+                valid_indices.append(idx)
+
+        if temp_index.ntotal == 0:
+            return []
+
+        # Ищем в временном индексе
+        scores, temp_indices = temp_index.search(query_embedding.astype('float32'), min(k, temp_index.ntotal))
+
+        results = []
+        for score, temp_idx in zip(scores[0], temp_indices[0]):
+            if temp_idx < len(valid_indices):
+                original_idx = valid_indices[temp_idx]
+                results.append({
+                    'index': original_idx,
+                    'score': float(score),
+                    'type': 'keyword'
+                })
+
+        return results
 
     def get_resume_details(self, index):
         """Получение деталей резюме по индексу"""
@@ -259,6 +430,9 @@ print("Инициализация поисковой системы...")
 search_engine = ResumeSearchEngine('База данных профессий.xlsx')
 search_engine.preprocess_data()
 search_engine.create_faiss_index()
+
+# Очистка устаревшего кэша (старше 30 дней)
+search_engine.clear_old_cache(max_age_days=30)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
