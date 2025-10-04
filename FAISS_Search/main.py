@@ -12,12 +12,39 @@ from dotenv import load_dotenv
 import pickle
 import hashlib
 import time
+from collections import Counter
+from rapidfuzz import fuzz, process
 
 # Загрузка переменных окружения из .env файла
 load_dotenv()
 
 # Активация nest_asyncio для работы в Jupyter/Colab
 nest_asyncio.apply()
+
+
+class SimpleRussianStemmer:
+    """Простой стеммер для русского языка"""
+
+    def __init__(self):
+        # Окончания для удаления (в порядке приоритета)
+        self.endings = [
+            'овский', 'евский', 'инский', 'енский', 'ый', 'ой', 'ая', 'яя', 'ое', 'ее',  # прилагательные
+            'ость', 'ей', 'а', 'я', 'о', 'е', 'ь', 'и', 'ы', 'у', 'ю', 'ем', 'ом', 'ами', 'ями'  # падежи
+        ]
+
+    def stem(self, word):
+        """Возвращает основу слова"""
+        if len(word) < 3:
+            return word
+
+        word_lower = word.lower()
+
+        # Удаляем окончания
+        for ending in self.endings:
+            if word_lower.endswith(ending) and len(word_lower) > len(ending) + 2:
+                return word_lower[:-len(ending)]
+
+        return word_lower
 
 
 class ResumeSearchEngine:
@@ -28,10 +55,49 @@ class ResumeSearchEngine:
         self.resume_texts = []
         self.cache_dir = "vector_cache"
         self.excel_file_path = excel_file_path
+        self.stemmer = SimpleRussianStemmer()
+
+        # Автоматически извлекаем популярные должности из данных
+        self.position_variations = self._extract_position_variations()
 
         # Создаем директорию для кэша, если её нет
         if not os.path.exists(self.cache_dir):
             os.makedirs(self.cache_dir)
+
+    def _extract_position_variations(self):
+        """Автоматически извлекает варианты написания должностей из данных"""
+        position_variations = {}
+
+        if 'positionName' not in self.df.columns:
+            return position_variations
+
+        # Собираем все уникальные должности
+        all_positions = self.df['positionName'].dropna().unique()
+
+        for position in all_positions:
+            if isinstance(position, str) and position.strip():
+                pos_lower = position.lower().strip()
+
+                # Извлекаем основу должности
+                words = self._extract_words(pos_lower)
+                if words:
+                    main_stem = words[0]  # Берем первый стем как основу
+
+                    if main_stem not in position_variations:
+                        position_variations[main_stem] = set()
+
+                    position_variations[main_stem].add(pos_lower)
+
+        # Преобразуем в списки
+        return {k: list(v) for k, v in position_variations.items()}
+
+    def _extract_words(self, text):
+        """Извлекает и стеммит слова из текста"""
+        # Убираем спецсимволы и цифры, оставляем только кириллические буквы
+        words = re.findall(r'[а-яё]+', text.lower())
+        # Стеммим слова и убираем слишком короткие
+        stemmed_words = [self.stemmer.stem(word) for word in words if len(word) >= 3]
+        return stemmed_words
 
     def _get_cache_key(self):
         """Генерирует ключ кэша на основе содержимого файла и модели"""
@@ -151,6 +217,7 @@ class ResumeSearchEngine:
             self.resume_texts.append(resume_text)
 
         print(f"Обработано {len(self.resume_texts)} резюме")
+        print(f"Автоматически извлечено {len(self.position_variations)} вариантов должностей")
 
     def create_faiss_index(self):
         """Создание или загрузка векторной базы данных FAISS"""
@@ -191,6 +258,49 @@ class ResumeSearchEngine:
                     os.remove(filepath)
                     print(f"Удален устаревший кэш: {filename}")
 
+    def fuzzy_position_search(self, position_query, k=10):
+        """Нечеткий поиск по должности с использованием fuzzy matching"""
+        position_results = []
+
+        if 'positionName' not in self.df.columns:
+            return position_results
+
+        query_lower = position_query.lower().strip()
+        query_stems = self._extract_words(query_lower)
+
+        if not query_stems:
+            return position_results
+
+        for idx, row in self.df.iterrows():
+            position = str(row.get('positionName', '')).lower()
+            if not position:
+                continue
+
+            # 1. Точное совпадение (самый высокий вес)
+            if query_lower in position or position in query_lower:
+                score = 1.0
+            else:
+                # 2. Fuzzy matching
+                fuzzy_score = fuzz.partial_ratio(query_lower, position) / 100.0
+
+                # 3. Стем-совпадение
+                position_stems = self._extract_words(position)
+                stem_overlap = len(set(query_stems) & set(position_stems)) / len(query_stems) if query_stems else 0
+
+                # Комбинируем оценки
+                score = max(fuzzy_score, stem_overlap * 0.8)
+
+            if score > 0.3:  # Порог для учета результата
+                position_results.append({
+                    'index': idx,
+                    'score': score,
+                    'type': 'position'
+                })
+
+        # Сортировка и возврат топ-k результатов
+        position_results.sort(key=lambda x: x['score'], reverse=True)
+        return position_results[:k]
+
     def keyword_search(self, query, k=10):
         """Поиск по ключевым словам"""
         query_embedding = self.model.encode([query])
@@ -211,29 +321,63 @@ class ResumeSearchEngine:
         return results
 
     def location_search(self, location_query, k=10):
-        """Поиск по геолокации"""
+        """Поиск по геолокации с использованием стемминга"""
         location_results = []
+
+        # Стеммим слова запроса
+        query_stems = self._extract_words(location_query)
+
+        if not query_stems:
+            return location_results
 
         for idx, row in self.df.iterrows():
             if pd.notna(row.get('localityName')):
-                location = str(row['localityName']).lower().replace('-', ' ')
-                query = location_query.lower()
+                location = str(row['localityName'])
+                location_stems = self._extract_words(location)
 
-                # Простой поиск по вхождению
-                if query in location:
-                    score = 1.0
+                if not location_stems:
+                    continue
+
+                # Вычисляем сходство на основе стеммов
+                query_counter = Counter(query_stems)
+                location_counter = Counter(location_stems)
+
+                # Находим общие стеммы
+                common_stems = set(query_stems).intersection(set(location_stems))
+
+                if common_stems:
+                    # Более сложная метрика сходства
+                    total_query_weight = sum(query_counter[stem] for stem in query_stems)
+                    common_weight = sum(min(query_counter[stem], location_counter[stem]) for stem in common_stems)
+
+                    # Учитываем также частичные совпадения
+                    partial_matches = 0
+                    for q_stem in query_stems:
+                        for l_stem in location_stems:
+                            # Частичное совпадение (один стемм содержится в другом)
+                            if q_stem in l_stem or l_stem in q_stem:
+                                partial_matches += 0.3
+                                break
+
+                    score = (common_weight / total_query_weight) + (partial_matches / len(query_stems))
+                    score = min(score, 1.0)  # Ограничиваем максимальный score
+
+                    # Увеличиваем вес точных совпадений
+                    exact_match = any(q_stem == l_stem for q_stem in query_stems for l_stem in location_stems)
+                    if exact_match:
+                        score = min(score + 0.2, 1.0)
                 else:
-                    # Вычисление сходства на основе совпадающих слов
-                    location_words = set(location.split())
-                    query_words = set(query.split())
-                    common_words = location_words.intersection(query_words)
+                    # Проверяем частичные совпадения
+                    partial_matches = 0
+                    for q_stem in query_stems:
+                        for l_stem in location_stems:
+                            if q_stem in l_stem or l_stem in q_stem:
+                                partial_matches += 1
+                                break
 
-                    if common_words:
-                        score = len(common_words) / len(query_words)
-                    else:
-                        score = 0.0
+                    score = partial_matches / len(query_stems) if query_stems else 0
 
-                if score > 0:
+                if score > 0.1:  # Минимальный порог
                     location_results.append({
                         'index': idx,
                         'score': score,
@@ -244,84 +388,95 @@ class ResumeSearchEngine:
         location_results.sort(key=lambda x: x['score'], reverse=True)
         return location_results[:k]
 
-    def hybrid_search(self, keyword_query, location_query, k=5, keyword_weight=0.3, location_weight=0.7):
-        """Гибридный поиск: сначала по локации, затем по профессии"""
-        print(f"Поиск: '{keyword_query}' в локации '{location_query}'")
+    def location_priority_search(self, keyword_query, location_query, k=5):
+        """Поиск с приоритетом локации: сначала фильтруем по локации, затем ищем по профессии"""
+        print(f"Поиск с приоритетом локации: '{keyword_query}' в '{location_query}'")
 
-        # Сначала ищем по локации
-        location_results = self.location_search(location_query, k=50)  # Берем больше результатов для фильтрации
+        # Шаг 1: Поиск по локации (первый приоритет)
+        location_results = self.location_search(location_query, k=50)
 
         if not location_results:
-            # Если нет результатов по локации, ищем только по ключевым словам
             print("Не найдено резюме в указанной локации, использую поиск только по профессии")
+            # Если нет результатов по локации, ищем только по ключевым словам
             keyword_results = self.keyword_search(keyword_query, k=k)
+            position_results = self.fuzzy_position_search(keyword_query, k=k)
 
-            # Преобразуем в тот же формат
-            final_results = []
-            for result in keyword_results:
-                final_results.append({
-                    'index': result['index'],
-                    'keyword_score': result['score'],
-                    'location_score': 0,
-                    'final_score': result['score'] * keyword_weight
-                })
-
-            return final_results[:k]
-
-        # Фильтруем результаты по локации (оставляем только с достаточно высоким score локации)
-        min_location_score = 0.3  # Минимальный порог совпадения по локации
-        filtered_location_results = [r for r in location_results if r['score'] >= min_location_score]
-
-        if not filtered_location_results:
-            # Если после фильтрации не осталось результатов, ослабляем критерий
-            filtered_location_results = location_results[:10]  # Берем топ-10 по локации
-
-        # Среди отфильтрованных по локации резюме ищем по ключевым словам
-        location_indices = [r['index'] for r in filtered_location_results]
-
-        # Выполняем поиск по ключевым словам только среди этих индексов
-        keyword_results = self._keyword_search_among_indices(keyword_query, location_indices, k=len(location_indices))
-
-        # Объединяем результаты
-        combined_results = {}
-
-        # Создаем словарь для быстрого доступа к результатам локации
-        location_dict = {r['index']: r for r in filtered_location_results}
-
-        # Объединяем score
-        for keyword_result in keyword_results:
-            idx = keyword_result['index']
-            if idx in location_dict:
-                location_score = location_dict[idx]['score']
-                keyword_score = keyword_result['score']
-
-                # Нормализуем scores
-                normalized_keyword = keyword_score
-                normalized_location = location_score
-
-                combined_results[idx] = {
-                    'index': idx,
-                    'keyword_score': normalized_keyword,
-                    'location_score': normalized_location,
-                    'final_score': (normalized_keyword * keyword_weight + normalized_location * location_weight)
-                }
-
-        # Если после объединения мало результатов, добавляем резюме только по локации
-        if len(combined_results) < k:
-            for location_result in filtered_location_results:
-                idx = location_result['index']
-                if idx not in combined_results:
-                    combined_results[idx] = {
+            # Объединяем результаты по профессии
+            all_profession_results = {}
+            for result in keyword_results + position_results:
+                idx = result['index']
+                if idx not in all_profession_results or result['score'] > all_profession_results[idx]['score']:
+                    all_profession_results[idx] = {
                         'index': idx,
-                        'keyword_score': 0,
-                        'location_score': location_result['score'],
-                        'final_score': location_result['score'] * location_weight
+                        'profession_score': result['score'],
+                        'location_score': 0
                     }
 
-        # Сортировка по итоговому score
-        final_results = sorted(combined_results.values(),
-                               key=lambda x: (x['final_score'], x['location_score'], x['keyword_score']),
-                               reverse=True)
+            final_results = []
+            for result in all_profession_results.values():
+                final_score = result['profession_score'] * 0.7  # Вес профессии когда нет локации
+                final_results.append({
+                    'index': result['index'],
+                    'profession_score': result['profession_score'],
+                    'location_score': 0,
+                    'final_score': final_score
+                })
+
+            final_results.sort(key=lambda x: x['final_score'], reverse=True)
+            return final_results[:k]
+
+        # Шаг 2: Среди результатов по локации ищем по профессии
+        location_indices = [r['index'] for r in location_results]
+
+        # Поиск по профессии только среди кандидатов из локации
+        profession_results = []
+
+        # Нечеткий поиск по должности
+        position_results = self.fuzzy_position_search(keyword_query, k=len(location_indices))
+        position_results = [r for r in position_results if r['index'] in location_indices]
+
+        # Семантический поиск по ключевым словам
+        keyword_results = self._keyword_search_among_indices(keyword_query, location_indices, k=len(location_indices))
+
+        # Объединяем результаты по профессии
+        profession_scores = {}
+        for result in position_results + keyword_results:
+            idx = result['index']
+            if idx not in profession_scores or result['score'] > profession_scores[idx]:
+                profession_scores[idx] = result['score']
+
+        # Шаг 3: Объединяем оценки локации и профессии
+        location_dict = {r['index']: r['score'] for r in location_results}
+
+        final_results = []
+        for idx in location_indices:
+            location_score = location_dict.get(idx, 0)
+            profession_score = profession_scores.get(idx, 0)
+
+            # Приоритет локации: location_weight = 0.7, profession_weight = 0.3
+            final_score = (location_score * 0.7) + (profession_score * 0.3)
+
+            final_results.append({
+                'index': idx,
+                'profession_score': profession_score,
+                'location_score': location_score,
+                'final_score': final_score
+            })
+
+        # Сортируем по убыванию final_score
+        final_results.sort(key=lambda x: x['final_score'], reverse=True)
+
+        # Если результатов меньше k, добавляем резюме с высокой оценкой локации
+        if len(final_results) < k:
+            for location_result in location_results:
+                idx = location_result['index']
+                if idx not in [r['index'] for r in final_results]:
+                    final_results.append({
+                        'index': idx,
+                        'profession_score': 0,
+                        'location_score': location_result['score'],
+                        'final_score': location_result['score'] * 0.7
+                    })
 
         return final_results[:k]
 
@@ -440,7 +595,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_text = """
 🤖 Добро пожаловать в бот поиска резюме!
 
-Для поиска отправьте сообщение в формате: водитель; Москва; 5
+Для поиска отправьте сообщение в формате: 
+*должность; город; количество*
+
+Примеры:
+• воспитатель; Челябинск; 5
+• помощник воспитателя; Москва; 3
+• водитель; Санкт-Петербург; 2
+
+💡 *Особенности поиска:*
+- Локация имеет высший приоритет
+- Учитываются разные варианты написания должностей
+- Поиск работает даже при неточном совпадении
     """
     await update.message.reply_text(welcome_text)
 
@@ -452,7 +618,10 @@ async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parts = user_input.split(';')
 
         if len(parts) < 3:
-            await update.message.reply_text("❌ Неверный формат. Используйте: [должность]; [город]; [количество]")
+            await update.message.reply_text(
+                "❌ Неверный формат. Используйте: [должность]; [город]; [количество]\n\n"
+                "Пример: воспитатель; Челябинск; 5"
+            )
             return
 
         keyword = parts[0].strip()
@@ -468,34 +637,49 @@ async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Укажите должность и местоположение")
             return
 
-        # Выполнение поиска
-        await update.message.reply_text("🔍 Ищу подходящие резюме...")
+        # Выполнение поиска с приоритетом локации
+        await update.message.reply_text(f"🔍 Ищу '{keyword}' в локации '{location}'...")
 
-        results = search_engine.hybrid_search(keyword, location, k=k)
+        results = search_engine.location_priority_search(keyword, location, k=k)
 
         if not results:
-            await update.message.reply_text("❌ Подходящих резюме не найдено")
+            alternative_msg = "❌ Подходящих резюме не найдено.\n\n"
+            alternative_msg += "💡 Попробуйте:\n"
+            alternative_msg += "• Изменить формулировку должности\n"
+            alternative_msg += "• Использовать похожие названия должностей\n"
+            alternative_msg += "• Расширить регион поиска\n"
+            alternative_msg += "• Уменьшить количество требуемых результатов"
+
+            await update.message.reply_text(alternative_msg)
             return
 
         # Формирование ответа
-        response = f"📊 Найдено резюме: {len(results)}\n\n"
+        response = f"📊 Найдено резюме: {len(results)}\n"
+        response += f"🔍 Запрос: {keyword} в {location}\n\n"
 
         for i, result in enumerate(results, 1):
             details = search_engine.get_resume_details(result['index'])
 
             if details:
-                response += f"🏆 **Резюме #{i}** (score: {result['final_score']:.2f})\n"
-                response += f"💼 Должность: {details['position']}\n"
-                response += f"📍 Местоположение: {details['location']}\n"
-                response += f"👤 Возраст: {details['age']}\n"
-                response += f"📅 Опыт: {details['experience']} лет\n"
-                response += f"🎓 Образование: {details['education']}\n"
-                response += f"💰 Зарплата: {details['salary']}\n"
-                response += f"🕒 График: {details['schedule']}\n"
-                response += f"🚗 Переезд: {details['relocation']}\n"
+                # Показываем детали scoring для прозрачности
+                score_info = f"(локация: {result['location_score']:.2f}, "
+                score_info += f"профессия: {result['profession_score']:.2f})"
+
+                response += f"🏆 **Резюме #{i}** {score_info}\n"
+                response += f"💼 **Должность:** {details['position']}\n"
+                response += f"📍 **Местоположение:** {details['location']}\n"
+                response += f"👤 **Возраст:** {details['age']}\n"
+                response += f"📅 **Опыт:** {details['experience']} лет\n"
+
+                if details['salary'] and str(details['salary']) != 'Не указано':
+                    response += f"💰 **Зарплата:** {details['salary']}\n"
+
+                response += f"🎓 **Образование:** {details['education']}\n"
+                response += f"🕒 **График:** {details['schedule']}\n"
+                response += f"🚗 **Переезд:** {details['relocation']}\n"
 
                 if i < len(results):
-                    response += "─" * 30 + "\n\n"
+                    response += "─" * 40 + "\n\n"
 
         # Разделение сообщения если слишком длинное
         if len(response) > 4096:
@@ -535,19 +719,22 @@ if __name__ == "__main__":
     # Пример поиска
     print("Демонстрация работы поисковой системы:")
 
-    # Пример 1: Поиск водителей в Москве
-    results = search_engine.hybrid_search("водитель", "Москва", k=3)
+    # Тестирование конкретного запроса
+    print("Тестирование поиска 'Помощник-воспитателя' в Челябинске...")
+    results = search_engine.location_priority_search("Помощник-воспитателя", "Челябинск", k=3)
+    print(f"\nНайдено {len(results)} резюме:")
+    for i, result in enumerate(results, 1):
+        details = search_engine.get_resume_details(result['index'])
+        print(
+            f"{i}. {details['position']} - {details['location']} (локация: {result['location_score']:.2f}, профессия: {result['profession_score']:.2f})")
+
+    # Пример 2: Поиск водителей в Москве
+    results = search_engine.location_priority_search("водитель", "Москва", k=2)
     print(f"\nНайдено {len(results)} резюме водителей в Москве:")
     for i, result in enumerate(results, 1):
         details = search_engine.get_resume_details(result['index'])
-        print(f"{i}. {details['position']} - {details['location']} (score: {result['final_score']:.2f})")
+        print(
+            f"{i}. {details['position']} - {details['location']} (локация: {result['location_score']:.2f}, профессия: {result['profession_score']:.2f})")
 
-    # Пример 2: Поиск продавцов в Санкт-Петербурге
-    results = search_engine.hybrid_search("продавец", "Санкт-Петербург", k=2)
-    print(f"\nНайдено {len(results)} резюме продавцов в Санкт-Петербурге:")
-    for i, result in enumerate(results, 1):
-        details = search_engine.get_resume_details(result['index'])
-        print(f"{i}. {details['position']} - {details['location']} (score: {result['final_score']:.2f})")
-
-    # Запуск бота (раскомментируйте для использования)
+    # Запуск бота
     main()
